@@ -18,6 +18,10 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/lucaszuzu17/PapyrusPDF/releases/latest"><b>⬇ Baixar o instalador para Windows</b></a>
+</p>
+
+<p align="center">
   <img src="docs/capturas/leitor.png" alt="Janela do PapyrusPDF com um documento aberto" width="860">
 </p>
 
@@ -65,17 +69,9 @@ mouse, `Esc`, `Delete`.
 
 ## Instalar
 
-O instalador para Windows é gerado a partir do código (requisitos na seção [Desenvolver](#desenvolver)):
-
-```bash
-npm install
-```
-
-```bash
-npm run dist
-```
-
-O arquivo sai em `dist\PapyrusPDF-Setup-<versão>.exe`.
+Baixe o `PapyrusPDF-Setup-<versão>.exe` na página de
+[Releases](https://github.com/lucaszuzu17/PapyrusPDF/releases/latest) e execute. Cada versão traz o SHA-256 do
+arquivo, para quem quiser conferir o download.
 
 - Instalação **por usuário** (não pede administrador), com escolha da pasta, atalhos na Área de Trabalho e no
   Menu Iniciar e desinstalador em "Aplicativos instalados". O instalador fica em português.
@@ -84,6 +80,8 @@ O arquivo sai em `dist\PapyrusPDF-Setup-<versão>.exe`.
 - **Não é assinado digitalmente.** Na primeira execução o SmartScreen avisa "O Windows protegeu o computador":
   clique em *Mais informações* → *Executar assim mesmo*.
 - Instalar uma versão nova por cima atualiza e mantém a assinatura salva e as preferências.
+- Para gerar o instalador a partir do código, siga a seção [Desenvolver](#desenvolver) e rode `npm run dist`; o
+  arquivo sai em `dist\PapyrusPDF-Setup-<versão>.exe`.
 
 <p>
   <img src="docs/icone-programa.png" width="72" alt="Ícone do programa">
