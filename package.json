@@ -1,0 +1,80 @@
+{
+  "name": "papiro-pdf",
+  "productName": "PapyrusPDF",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Editor de PDF para Windows, de código aberto e offline (Electron + MuPDF + Tesseract)",
+  "author": "lucaszuzu17",
+  "homepage": "https://github.com/lucaszuzu17/PapyrusPDF",
+  "repository": { "type": "git", "url": "git+https://github.com/lucaszuzu17/PapyrusPDF.git" },
+  "bugs": { "url": "https://github.com/lucaszuzu17/PapyrusPDF/issues" },
+  "license": "AGPL-3.0-or-later",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "engines": { "node": ">=24.2" },
+  "scripts": {
+    "postinstall": "install-electron",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/engine.test.ts test/features.test.ts test/review.test.ts",
+    "fixtures": "node test/fixtures.ts",
+    "e2e": "electron-vite build && node test/run-e2e.mjs",
+    "icon": "node build/make-icon.ts",
+    "dist": "electron-vite build && electron-builder --win nsis --x64",
+    "e2e:dist": "node test/run-e2e.mjs --packaged"
+  },
+  "dependencies": {
+    "@tesseract.js-data/por": "^1.0.0",
+    "mupdf": "^1.28.6",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "build": {
+    "appId": "local.papiro.pdf",
+    "productName": "PapyrusPDF",
+    "copyright": "Copyright (C) 2026 lucaszuzu17. Software livre sob a AGPL-3.0-or-later.",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["out/**", "package.json"],
+    "extraFiles": [{ "from": "LICENSE", "to": "LICENSE.PapyrusPDF.txt" }],
+    "asar": false,
+    "electronLanguages": ["pt-BR", "en-US"],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.ico",
+      "artifactName": "PapyrusPDF-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PapyrusPDF",
+      "uninstallDisplayName": "PapyrusPDF",
+      "installerLanguages": ["pt_BR"],
+      "language": "1046",
+      "deleteAppDataOnUninstall": false
+    },
+    "fileAssociations": [
+      { "ext": "pdf", "name": "Documento PDF", "description": "Documento PDF", "role": "Editor", "icon": "build/file.ico" }
+    ]
+  },
+  "allowScripts": {
+    "tesseract.js": false,
+    "electron-winstaller": false
+  }
+}

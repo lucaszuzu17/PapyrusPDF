@@ -1,0 +1,71 @@
+// Ícones próprios em SVG (traço 24×24).
+import type { JSX } from "react";
+
+const P: Record<string, JSX.Element> = {
+  open: <><path d="M3 7h6l2 2h10v10H3z" /><path d="M3 7V5h6l2 2" /></>,
+  save: <><path d="M5 3h11l3 3v15H5z" /><path d="M8 3v6h8V3M8 21v-7h8v7" /></>,
+  saveAs: <><path d="M5 3h11l3 3v7M5 3v18h8" /><path d="M8 3v6h8V3" /><path d="M15 21l6-6M18 15h3v3" /></>,
+  merge: <><rect x="3" y="3" width="8" height="11" rx="1" /><rect x="13" y="10" width="8" height="11" rx="1" /><path d="M11 8h4v2" /></>,
+  select: <><path d="M5 3l14 8-6 2-2 6z" /></>,
+  hand: <><path d="M8 13V5a1.5 1.5 0 013 0v6M11 11V4a1.5 1.5 0 013 0v7M14 11V6a1.5 1.5 0 013 0v8c0 4-3 7-7 7-3 0-5-2-6-4l-2-4a1.5 1.5 0 012.5-1.5L8 14" /></>,
+  zoomIn: <><circle cx="10" cy="10" r="6" /><path d="M14.5 14.5L20 20M7 10h6M10 7v6" /></>,
+  zoomOut: <><circle cx="10" cy="10" r="6" /><path d="M14.5 14.5L20 20M7 10h6" /></>,
+  fitWidth: <><path d="M3 12h18M6 9l-3 3 3 3M18 9l3 3-3 3" /><path d="M3 4v16M21 4v16" /></>,
+  undo: <><path d="M9 14L4 9l5-5" /><path d="M4 9h10a6 6 0 010 12h-3" /></>,
+  redo: <><path d="M15 14l5-5-5-5" /><path d="M20 9H10a6 6 0 000 12h3" /></>,
+  highlight: <><path d="M4 20h16" /><path d="M7 16l1-4 8-8 3 3-8 8z" /></>,
+  underline: <><path d="M7 4v7a5 5 0 0010 0V4M5 20h14" /></>,
+  strike: <><path d="M5 12h14M16 7a4 3 0 00-8 0c0 4 8 3 8 7a4 3 0 01-8 1" /></>,
+  note: <><path d="M4 4h16v12H9l-5 4z" /><path d="M8 9h8M8 12h5" /></>,
+  freetext: <><rect x="3" y="5" width="18" height="14" rx="1" /><path d="M8 9h8M12 9v7" /></>,
+  ink: <><path d="M3 17c3-6 5-6 6-3s3 3 5-2 4-6 7-4" /></>,
+  rect: <><rect x="4" y="6" width="16" height="12" /></>,
+  ellipse: <><ellipse cx="12" cy="12" rx="8" ry="6" /></>,
+  line: <><path d="M5 19L19 5" /></>,
+  arrow: <><path d="M5 19L19 5M10 5h9v9" /></>,
+  editText: <><path d="M4 6V4h12v2M10 4v14M7 18h6" /><path d="M14 20l6-6 2 2-6 6h-2z" /></>,
+  rotateCw: <><path d="M20 4v6h-6" /><path d="M20 10a8 8 0 10-2 7" /></>,
+  rotateCcw: <><path d="M4 4v6h6" /><path d="M4 10a8 8 0 112 7" /></>,
+  trash: <><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14" /></>,
+  blank: <><path d="M6 3h9l4 4v14H6z" /><path d="M12 10v6M9 13h6" /></>,
+  insertFile: <><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v4h4M9 14h6M12 11v6" /></>,
+  extract: <><path d="M6 3h9l4 4v14H6z" /><path d="M12 9v8M9 14l3 3 3-3" /></>,
+  split: <><path d="M6 3h12v7H6zM6 14h12v7H6z" /><path d="M3 12h3M18 12h3" /></>,
+  grid: <><rect x="4" y="4" width="7" height="7" /><rect x="13" y="4" width="7" height="7" /><rect x="4" y="13" width="7" height="7" /><rect x="13" y="13" width="7" height="7" /></>,
+  sign: <><path d="M3 18c4 0 4-10 7-10s0 9 3 9 2-4 4-4 2 3 4 3" /><path d="M3 21h18" /></>,
+  clear: <><circle cx="12" cy="12" r="8" /><path d="M8 8l8 8" /></>,
+  redact: <><rect x="3" y="8" width="18" height="8" fill="currentColor" /><path d="M3 4h10M3 20h14" /></>,
+  apply: <><path d="M5 12l4 4 10-10" /></>,
+  ocr: <><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" /><path d="M8 9h8M8 12h8M8 15h5" /></>,
+  ocrAll: <><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" /><path d="M8 8h8M8 11h8M8 14h8M8 17h4" /></>,
+  search: <><circle cx="10" cy="10" r="6" /><path d="M14.5 14.5L20 20" /></>,
+  pages: <><rect x="5" y="3" width="10" height="13" /><rect x="9" y="8" width="10" height="13" /></>,
+  bookmark: <><path d="M6 3h12v18l-6-4-6 4z" /></>,
+  comments: <><path d="M4 4h16v12H9l-5 4z" /></>,
+  close: <><path d="M6 6l12 12M18 6L6 18" /></>,
+  copy: <><rect x="8" y="8" width="12" height="12" /><path d="M4 16V4h12" /></>,
+  chevL: <><path d="M15 6l-6 6 6 6" /></>,
+  chevR: <><path d="M9 6l6 6-6 6" /></>,
+  form: <><rect x="3" y="5" width="18" height="14" /><path d="M6 10h6M6 14h12" /></>,
+  print: <><path d="M7 8V3h10v5" /><rect x="3" y="8" width="18" height="9" rx="1" /><path d="M7 14h10v7H7z" /></>,
+  compress: <><path d="M6 3h9l4 4v14H6z" /><path d="M12 8v3M10 9.5l2 2 2-2M12 19v-3M10 17.5l2-2 2 2M9 13.5h6" /></>,
+  image: <><rect x="3" y="5" width="18" height="14" rx="1" /><circle cx="8.5" cy="10" r="1.6" /><path d="M21 16l-5-5-8 8" /></>,
+  imageOut: <><path d="M12 5H4v14h16v-7" /><path d="M20 15l-4-4-7 7" /><path d="M15 6h6M18 3l3 3-3 3" /></>,
+  lock: <><rect x="5" y="11" width="14" height="10" rx="1.5" /><path d="M8 11V8a4 4 0 018 0v3" /><path d="M12 15v2.5" /></>,
+  unlock: <><rect x="5" y="11" width="14" height="10" rx="1.5" /><path d="M8 11V8a4 4 0 017.5-2" /><path d="M12 15v2.5" /></>,
+  header: <><rect x="5" y="3" width="14" height="18" /><path d="M8 6.5h8M8 17.5h8" /></>,
+  number: <><rect x="5" y="3" width="14" height="18" /><path d="M11 13l1.5-1v5M10.5 17h3" /></>,
+  watermark: <><rect x="5" y="3" width="14" height="18" /><path d="M8 16l8-8M8 12l4-4M12 16l4-4" /></>,
+  stamp: <><path d="M9 4h6v4l1.5 5h-9L9 8z" /><path d="M5 13h14v4H5zM5 20.5h14" /></>,
+  folder: <><path d="M3 6h7l2 2h9v11H3z" /></>,
+  clock: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>,
+};
+
+export function Icon({ name, size = 20 }: { name: string; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {P[name] ?? <circle cx="12" cy="12" r="8" />}
+    </svg>
+  );
+}

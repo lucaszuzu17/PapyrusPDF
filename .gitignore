@@ -1,0 +1,25 @@
+# dependências e saídas de compilação
+node_modules/
+out/
+dist/
+
+# gerados pelos testes
+test/out/
+test/e2e-out/
+test/tmp/
+# PDFs de exemplo: recriados por `npm run fixtures` (o e2e gera sozinho se faltarem)
+test/fixtures/
+
+# prévias dos ícones geradas por `npm run icon`
+build/preview-*.png
+
+# sistema e editores
+Thumbs.db
+desktop.ini
+.DS_Store
+*.log
+.vscode/
+.idea/
+.claude/
+.env
+.env.*
