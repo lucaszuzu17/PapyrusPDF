@@ -78,6 +78,7 @@ export default async function run(win, { callEngine, hooks, userData }) {
   log("documento:", info.title, info.pageCount, "páginas");
 
   if (process.env.PAPIRO_E2E_CASE === "recursos") return featuresCase();
+  if (process.env.PAPIRO_E2E_CASE === "abas") return tabsCase();
   if (/escaneado/i.test(info.title)) return ocrCase();
   if (/formulario/i.test(info.title)) return formCase();
   return mainCase();
@@ -284,12 +285,13 @@ export default async function run(win, { callEngine, hooks, userData }) {
     // --- exportar como imagem ---
     const png = join(tmp, "pagina.png");
     hooks.save.push(png);
-    await tab("Início");
-    await cmd("Como imagem");
+    await tab("Converter");
+    await cmd("Imagem");
     await form("Exportar como imagem");
     await button("Exportar…", ".modal");
     await noModal(); await settle();
     expect(existsSync(png) && readFileSync(png).subarray(1, 4).toString() === "PNG", "página exportada em PNG");
+    await tab("Início");
 
     // --- comprimir ---
     const small = join(tmp, "comprimido.pdf");
@@ -365,16 +367,15 @@ export default async function run(win, { callEngine, hooks, userData }) {
     await waitFor(`document.querySelectorAll(".page").length === 3 && !document.querySelector(".busy")`, "imagens soltas viraram páginas", 30000);
     expect((await engine("info")).dirty, "documento marcado como alterado");
 
-    // --- criar PDF a partir de imagens (com aviso de alterações não salvas) ---
+    // --- criar PDF a partir de imagens: abre numa aba nova (o documento alterado continua aberto) ---
     hooks.open.push([foto, foto]);
     await tab("Início");
     await cmd("De imagens");
     await form("Criar PDF a partir de imagens");
     await select("page", "imagem");
     await button("Criar PDF", ".modal");
-    await form("Alterações não salvas");
-    await button("Descartar alterações", ".modal");
     await waitFor(`document.querySelectorAll(".page").length === 2 && !document.querySelector(".busy")`, "PDF criado a partir das imagens", 30000);
+    expect(await js(`document.querySelectorAll(".doctab").length`) === 3, "PDF novo abriu numa terceira aba");
     inf = await engine("info");
     expect(inf.pageCount === 2 && Math.round(inf.pages[0].width) === 842 && Math.round(inf.pages[0].height) === 561, `páginas do tamanho da imagem (${inf.pages[0].width}×${inf.pages[0].height})`);
     await rendered(0); await sleep(400);
@@ -386,9 +387,8 @@ export default async function run(win, { callEngine, hooks, userData }) {
     const child = spawn(process.execPath, args, { env: process.env, stdio: "ignore" });
     const code = await new Promise((r) => child.on("exit", r));
     expect(code === 0, "a segunda instância encerra sozinha");
-    await form("Alterações não salvas");
-    await button("Descartar alterações", ".modal");
     await waitFor(`document.querySelectorAll(".page").length === 3 && !document.querySelector(".busy")`, "PDF da segunda instância aberto", 30000);
+    expect(await js(`document.querySelectorAll(".doctab").length`) === 4, "PDF da segunda instância abriu numa aba nova");
     expect(/amostra\.pdf/.test(win.getTitle()), `segunda instância entregou o arquivo (${win.getTitle()})`);
     expect(await js(`document.querySelector(".pgnum").value`) === "3", "reabriu na página 3, onde tinha ficado");
 
@@ -410,6 +410,185 @@ export default async function run(win, { callEngine, hooks, userData }) {
     chk = await engine("open", new Uint8Array(readFileSync(small)), "comprimido");
     expect(chk.pageCount === 4 && (await engine("search", "CONFIDENCIAL")).length === 3, "arquivo comprimido mantém páginas e texto");
     log("PASSOU: recursos 0.2");
+  }
+
+  // ---------- versão 0.4: abas, duas páginas, tela cheia, converter, fonte original e OCR ----------
+  async function tabsCase() {
+    const tmp = join(OUT, "abas");
+    rmSync(tmp, { recursive: true, force: true });
+    mkdirSync(tmp, { recursive: true });
+    const tab = (name) => button(name, ".ribbon-tabs");
+    const cmd = (name) => button(name, ".ribbon-body");
+    const fixture = (n) => resolve("test/fixtures", n);
+    const tabs = () => js(`[...document.querySelectorAll(".doctab")].map((t) => t.querySelector(".dt-name").textContent.replace(/^•/, ""))`);
+    const activeTab = () => js(`(document.querySelector(".doctab.on .dt-name")?.textContent ?? "").replace(/^•/, "")`);
+    const settle = async () => { await sleep(250); await idle(); await sleep(150); };
+    const openViaDialog = async (path) => { hooks.open.push([path]); await key("O", ["control"]); await settle(); };
+    const toast = () => js(`document.querySelector(".toast")?.textContent ?? ""`);
+    const clickSel = async (sel) => { const r = await rectOf(sel); if (!r) throw new Error(`não achei ${sel}`); await click(r.x + r.w / 2, r.y + r.h / 2); };
+    const goPage = (n) => js(`(() => { const i = document.querySelector(".pgnum"); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set; set.call(i, "${n}"); i.dispatchEvent(new Event("input", { bubbles: true })); i.form.requestSubmit(); })()`);
+
+    // --- abas: abrir outro PDF não fecha o primeiro ---
+    expect((await tabs()).length === 1, "começa com uma aba");
+    await openViaDialog(fixture("formulario.pdf"));
+    expect(JSON.stringify(await tabs()) === JSON.stringify(["amostra.pdf", "formulario.pdf"]), `duas abas (${await tabs()})`);
+    expect(await activeTab() === "formulario.pdf" && (await engine("info")).pageCount === 1, "a aba nova fica na frente");
+    // a primeira aba guarda a página em que estava
+    await button("amostra.pdf", ".tabbar");
+    await waitFor(`document.querySelectorAll(".page").length === 3`, "amostra de volta");
+    await goPage(3);
+    await sleep(500);
+    await key("Tab", ["control"]);
+    await waitFor(`document.querySelectorAll(".page").length === 1`, "Ctrl+Tab foi para o formulário");
+    await key("Tab", ["control"]);
+    await waitFor(`document.querySelectorAll(".page").length === 3`, "Ctrl+Tab voltou para a amostra");
+    await sleep(400);
+    expect(await js(`document.querySelector(".pgnum").value`) === "3", "a aba voltou na página 3, onde estava");
+    // abrir de novo um arquivo já aberto só troca de aba
+    await openViaDialog(fixture("formulario.pdf"));
+    expect((await tabs()).length === 2 && await activeTab() === "formulario.pdf", "arquivo já aberto não cria aba repetida");
+    // fechar uma aba alterada pede confirmação
+    await tab("Organizar");
+    await cmd("Girar →");
+    await settle();
+    expect(await js(`!!document.querySelector(".doctab.on .dt-dot")`), "aba alterada mostra o ponto");
+    await key("W", ["control"]);
+    await waitFor(`document.querySelector(".modal h2")?.textContent === "Alterações não salvas"`, "confirmação ao fechar aba alterada");
+    await button("Fechar sem salvar", ".modal");
+    await settle();
+    expect(JSON.stringify(await tabs()) === JSON.stringify(["amostra.pdf"]), "aba fechada; a outra continua");
+    expect((await engine("info")).pageCount === 3, "o motor voltou para a amostra");
+
+    // --- duas páginas ---
+    await openViaDialog(fixture("escaneado.pdf"));
+    await button("amostra.pdf", ".tabbar");
+    await waitFor(`document.querySelectorAll(".page").length === 3`, "amostra de volta");
+    await clickSel('.status button[title="Duas páginas"]');
+    await waitFor(`document.querySelectorAll(".spread").length === 2`, "páginas em pares");
+    const p0 = await rectOf('.page[data-page="0"]'), p1 = await rectOf('.page[data-page="1"]');
+    expect(Math.abs(p0.y - p1.y) < 2 && p1.x > p0.x + p0.w, "páginas 1 e 2 lado a lado");
+    await goPage(1);
+    await key("0", ["control"]);
+    await rendered(0); await rendered(1); await sleep(600);
+    await shot("10-abas-duas-paginas");
+    expect(await js(`localStorage.getItem("papiro.layout")`) === "double", "a escolha fica guardada");
+
+    // --- tela cheia ---
+    await key("F11");
+    await waitFor(`!document.querySelector(".ribbon") && !!document.querySelector(".fs-exit")`, "tela cheia sem barras");
+    await sleep(800);
+    expect(win.isFullScreen(), "janela em tela cheia");
+    await key("Right");
+    await sleep(500);
+    expect(await js(`document.querySelector(".pgnum") === null && document.querySelector('.page[data-page="2"]').getBoundingClientRect().top < 120`), "seta para a direita avança para o próximo par");
+    await shot("11-tela-cheia");
+    await key("Escape");
+    await waitFor(`!!document.querySelector(".ribbon")`, "Esc sai da tela cheia");
+    await sleep(800);
+    expect(!win.isFullScreen(), "janela saiu da tela cheia");
+    await clickSel('.status button[title="Uma página"]');
+    await waitFor(`document.querySelectorAll(".spread").length === 0`, "de volta a uma página");
+
+    // --- converter para Word e para texto ---
+    const docx = join(tmp, "amostra.docx"), txt = join(tmp, "amostra.txt");
+    hooks.save.push(docx);
+    await tab("Converter");
+    await cmd("Word");
+    await waitFor(`/Documento do Word salvo/.test(document.querySelector(".toast")?.textContent ?? "")`, "aviso do Word", 60000);
+    const zipBytes = readFileSync(docx);
+    expect(zipBytes.subarray(0, 2).toString() === "PK" && zipBytes.length > 2000, `arquivo .docx gravado (${zipBytes.length} bytes)`);
+    expect(zipBytes.includes(Buffer.from("word/document.xml")), "o .docx tem o documento do Word");
+    hooks.save.push(txt);
+    await cmd("Texto");
+    await waitFor(`/Texto salvo/.test(document.querySelector(".toast")?.textContent ?? "")`, "aviso do texto", 60000);
+    expect(/Relatório mensal — página 3/.test(readFileSync(txt, "utf8")), "arquivo .txt com o texto das páginas");
+    await shot("12-converter");
+
+    // --- editar texto mantendo a fonte embutida ---
+    if (existsSync(fixture("fontes.pdf"))) {
+      await openViaDialog(fixture("fontes.pdf"));
+      await rendered(0);
+      await tab("Editar");
+      await cmd("Editar texto");
+      await waitFor(`document.querySelectorAll(".eblock").length > 0`, "blocos de texto");
+      const blocks = await engine("pageText", 0);
+      const bi = blocks.findIndex((b) => b.lines.some((l) => l.text.includes("Este relatório")));
+      const br = await rectOf(".eblock", bi);
+      await click(br.x + br.w / 2, br.y + br.h / 2);
+      await waitFor(`!!document.querySelector("textarea.editor")`, "editor de parágrafo");
+      expect(/Calibri/.test(await js(`getComputedStyle(document.querySelector("textarea.editor")).fontFamily`)), "o editor mostra o texto em Calibri");
+      await js(`document.querySelector("textarea.editor").select()`);
+      wc.insertText("Este relatório foi revisado pelo PapyrusPDF. Kátia e Zé conferiram o quadro QGBT.");
+      await sleep(200);
+      await key("Enter", ["control"]);
+      await idle();
+      const line = (await engine("pageText", 0)).flatMap((b) => b.lines).find((l) => l.text.includes("revisado"));
+      expect(line && line.font === "ABCDEF+Calibri", `texto novo na fonte embutida do documento (${line?.font})`);
+      expect(/Windows/.test(await toast()), `aviso de que letras vieram da fonte do Windows (${await toast()})`);
+      await tab("Início"); await cmd("Selecionar");
+      await rendered(0); await sleep(500);
+      await shot("13-fonte-original");
+    } else log("fontes.pdf ausente (Calibri não instalada): edição com fonte original não testada");
+
+    // --- OCR em outro idioma ---
+    await button("escaneado.pdf", ".tabbar");
+    await waitFor(`!!document.querySelector(".banner")`, "aviso de escaneado na aba");
+    await tab("Reconhecer texto");
+    await js(`(() => { const s = document.querySelector(".ocrlang select"); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set; set.call(s, "por+eng"); s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+    await sleep(300);
+    expect(await js(`localStorage.getItem("papiro.ocrLang")`) === "por+eng", "idioma do OCR guardado");
+    await shot("14-ocr-idioma");
+    await cmd("Esta página");
+    await waitFor(`!document.querySelector(".busy")`, "OCR em português + inglês", 180000);
+    expect((await engine("search", "Manaus")).length >= 1, "OCR com dois idiomas reconheceu o texto");
+    // --- remover marca d'água ---
+    await button("amostra.pdf", ".tabbar");
+    await waitFor(`document.querySelectorAll(".page").length === 3 && !document.querySelector(".busy")`, "amostra de volta");
+    await tab("Editar");
+    await cmd("Marca d'água");
+    await waitFor(`document.querySelector(".modal h2")?.textContent === "Marca d'água"`, "formulário da marca d'água");
+    await button("Aplicar em todas as páginas", ".modal");
+    await settle();
+    expect((await engine("search", "CONFIDENCIAL")).length === 3, "marca d'água aplicada nas 3 páginas");
+    await cmd("Remover marca d'água");
+    await waitFor(`/Marca d'água removida de 3 página/.test(document.querySelector(".toast")?.textContent ?? "")`, "aviso da remoção");
+    expect((await engine("search", "CONFIDENCIAL")).length === 0, "marca d'água removida das 3 páginas");
+    expect((await engine("search", "Manaus")).length === 3, "o texto das páginas continua");
+    await key("Z", ["control"]);
+    await settle();
+    expect((await engine("search", "CONFIDENCIAL")).length === 3, "Ctrl+Z traz a marca de volta");
+    await key("Z", ["control"]);
+    await settle();
+
+    // --- proteger: senha gerada, cópia para destinatário e páginas como imagem ---
+    const copia = join(tmp, "amostra_Joao_Silva.pdf");
+    hooks.save.push(copia);
+    await tab("Proteger");
+    await cmd("Proteger com senha");
+    await waitFor(`document.querySelector(".modal h2")?.textContent === "Proteger com senha"`, "formulário de proteger");
+    await clickSel(".fld-action");
+    await sleep(200);
+    const pw = await js(`document.querySelector("#f-pw").value`);
+    expect(/^[A-Za-z2-9]{4}(-[A-Za-z2-9]{4}){3}$/.test(pw) && await js(`document.querySelector("#f-pw2").value`) === pw, `senha forte gerada e repetida (${pw})`);
+    expect(await js(`document.querySelector("#f-pw").type`) === "text", "senha gerada fica visível");
+    expect(/Muito forte/.test(await js(`document.querySelector(".fld-note")?.textContent ?? ""`)), "medidor mostra Muito forte");
+    const rr = await rectOf("#f-recipient");
+    await click(rr.x + rr.w / 2, rr.y + rr.h / 2);
+    wc.insertText("João Silva");
+    await js(`(() => { const s = document.querySelector("#f-img"); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set; set.call(s, "150"); s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+    await sleep(300);
+    await shot("15-proteger");
+    await button("Proteger e salvar…", ".modal");
+    await waitFor(`/Cópia para João Silva salva/.test(document.querySelector(".toast")?.textContent ?? "")`, "aviso da cópia", 60000);
+    expect(await activeTab() === "amostra.pdf" && (await engine("search", "Manaus")).length === 3, "o documento aberto continua o mesmo");
+    const chk = await callEngine("open", [new Uint8Array(readFileSync(copia)), "copia"], 999);
+    expect(chk.pageCount === 0 && await callEngine("needsPassword", [], 999), "a cópia pede senha");
+    const ok = await callEngine("unlock", [pw], 999);
+    const words = (await callEngine("pageText", [0], 999)).length;
+    expect(ok.pageCount === 3 && words === 0, "a senha gerada abre a cópia, que virou imagem (sem texto)");
+    await callEngine("dispose", [], 999);
+
+    log("PASSOU: abas, duas páginas, tela cheia, converter, fonte original, OCR, marca d'água e proteção");
   }
 
   async function formCase() {

@@ -56,9 +56,17 @@ const P: Record<string, JSX.Element> = {
   header: <><rect x="5" y="3" width="14" height="18" /><path d="M8 6.5h8M8 17.5h8" /></>,
   number: <><rect x="5" y="3" width="14" height="18" /><path d="M11 13l1.5-1v5M10.5 17h3" /></>,
   watermark: <><rect x="5" y="3" width="14" height="18" /><path d="M8 16l8-8M8 12l4-4M12 16l4-4" /></>,
+  watermarkOff: <><rect x="5" y="3" width="14" height="18" /><path d="M8 16l8-8M8 12l4-4" /><circle cx="17" cy="17" r="4.2" fill="var(--bg, #fff)" /><path d="M15.3 15.3l3.4 3.4M18.7 15.3l-3.4 3.4" /></>,
   stamp: <><path d="M9 4h6v4l1.5 5h-9L9 8z" /><path d="M5 13h14v4H5zM5 20.5h14" /></>,
   folder: <><path d="M3 6h7l2 2h9v11H3z" /></>,
   clock: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>,
+  onePage: <><rect x="7" y="3" width="10" height="13" /><path d="M7 19.5h10" /></>,
+  twoPages: <><rect x="2.5" y="4" width="8.5" height="12" /><rect x="13" y="4" width="8.5" height="12" /><path d="M2.5 19.5h19" /></>,
+  fullscreen: <><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" /></>,
+  toWord: <><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v4h4" /><path d="M8.5 11l1.3 6 2.2-4.5 2.2 4.5 1.3-6" /></>,
+  toText: <><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v4h4" /><path d="M9 11h7M9 14h7M9 17h4" /></>,
+  plus: <><path d="M12 5v14M5 12h14" /></>,
+  language: <><circle cx="12" cy="12" r="8.5" /><path d="M3.5 12h17M12 3.5c3 3.2 3 13.8 0 17M12 3.5c-3 3.2-3 13.8 0 17" /></>,
 };
 
 export function Icon({ name, size = 20 }: { name: string; size?: number }) {

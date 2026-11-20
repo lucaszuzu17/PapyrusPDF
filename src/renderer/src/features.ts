@@ -2,6 +2,7 @@
 // marca d'água, carimbos e exportação de imagens.
 import { engine, type MarginPos, type RGB } from "./api.ts";
 import { makeStamp, STAMP_PRESETS } from "./images.ts";
+import { generatePassword, passwordStrength } from "./password.ts";
 import type { useApp } from "./state.tsx";
 
 type App = ReturnType<typeof useApp>;
@@ -19,32 +20,71 @@ export async function protect(a: App): Promise<void> {
     title: "Proteger com senha", okLabel: "Proteger e salvar…",
     message: "A senha passa a ser pedida para abrir o arquivo. As permissões valem para quem abrir o PDF em outros programas.",
     fields: [
-      { id: "pw", label: "Senha para abrir (deixe em branco para não pedir)", type: "password", value: "", span: 3 },
-      { id: "pw2", label: "Repita a senha", type: "password", value: "", span: 3 },
+      { id: "pw", label: "Senha para abrir (em branco = não pede)", type: "password", value: "", span: 3,
+        action: {
+          label: "Gerar senha forte", reveal: true,
+          run: (cur) => {
+            const g = generatePassword();
+            navigator.clipboard.writeText(g).catch(() => {});
+            return { ...cur, pw: g, pw2: g, gen: g };
+          },
+        },
+        note: (cur) => {
+          const pw = String(cur.pw);
+          if (!pw) return null;
+          const st = passwordStrength(pw);
+          return { text: `${st.label}. ${st.hint}`, level: st.score };
+        } },
+      { id: "pw2", label: "Repita a senha", type: "password", value: "", span: 3,
+        note: (cur) => (cur.gen && cur.gen === cur.pw && cur.pw === cur.pw2
+          ? { text: "Senha gerada e copiada para a área de transferência: guarde-a num lugar seguro." } : null) },
       { id: "print", label: "Permitir imprimir", type: "checkbox", value: true, span: 3 },
       { id: "copy", label: "Permitir copiar texto e imagens", type: "checkbox", value: true, span: 3 },
       { id: "edit", label: "Permitir alterar o conteúdo", type: "checkbox", value: true, span: 3 },
       { id: "annotate", label: "Permitir comentar e preencher", type: "checkbox", value: true, span: 3 },
+      { id: "recipient", label: "Cópia para (opcional): o nome vira marca d'água e rodapé em todas as páginas", type: "text", value: "",
+        placeholder: "Ex.: João Silva — Construtora Exemplo",
+        note: (cur) => (String(cur.recipient).trim() ? { text: "Grava uma cópia marcada; o documento aberto continua sem a marca." } : null) },
+      { id: "img", label: "Páginas como imagem", type: "select", value: "0", options: [
+        { value: "0", label: "Não — o texto continua selecionável e pesquisável" },
+        { value: "150", label: "Sim, 150 dpi — dificulta copiar e editar o texto" },
+        { value: "200", label: "Sim, 200 dpi — idem, com melhor qualidade de impressão" },
+      ], note: (cur) => (cur.img !== "0" ? { text: "Na cópia, o texto vira parte da imagem: não dá mais para selecionar, pesquisar nem editar. A marca do destinatário também fica presa na imagem." } : null) },
     ],
     validate: (f) => {
       const pw = String(f.pw);
       if (pw !== String(f.pw2)) return "As duas senhas não são iguais.";
       if (/[,=]/.test(pw)) return "A senha não pode ter vírgula nem sinal de igual.";
       if (pw.length > 100) return "A senha pode ter no máximo 100 caracteres.";
-      if (!pw && f.print && f.copy && f.edit && f.annotate) return "Defina uma senha ou desmarque pelo menos uma permissão.";
+      const copy = String(f.recipient).trim() || f.img !== "0";
+      if (!pw && !copy && f.print && f.copy && f.edit && f.annotate) return "Defina uma senha ou desmarque pelo menos uma permissão.";
+      if (String(f.recipient).length > 60) return "O nome do destinatário pode ter no máximo 60 caracteres.";
       return null;
     },
   });
   if (!v) return;
   const pw = String(v.pw);
-  const path = await window.papiro.saveDialog(a.doc!.path ?? `${base(a)}_protegido.pdf`);
+  const recipient = String(v.recipient).trim();
+  const imageOnly = Number(v.img) || 0;
+  const copyOnly = !!recipient || imageOnly > 0;
+  const slug = recipient.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
+  const suggested = copyOnly ? `${base(a)}_${slug || "imagem"}.pdf` : a.doc!.path ?? `${base(a)}_protegido.pdf`;
+  const path = await window.papiro.saveDialog(suggested);
   if (!path) return;
-  await a.task("Protegendo…", async () => {
+  if (copyOnly && samePath(a.doc!.path, path)) { a.notify("Escolha outro nome: a cópia não pode substituir o arquivo aberto."); return; }
+  await a.task(copyOnly ? "Gerando a cópia…" : "Protegendo…", async () => {
     const bytes = await engine.exportProtected({
       userPassword: pw || undefined,
       permissions: { print: !!v.print, copy: !!v.copy, edit: !!v.edit, annotate: !!v.annotate },
+      recipient: recipient || undefined,
+      imageOnly,
     });
     try { await window.papiro.writeFile(path, bytes); } finally { await a.refresh(); }
+    if (copyOnly) {
+      // cópia para outra pessoa: o original continua aberto, sem a marca
+      a.notify(`${recipient ? `Cópia para ${recipient}` : "Cópia em imagem"} salva em ${path}${pw ? " (com senha)" : ""}. O documento aberto não mudou.`);
+      return;
+    }
     await a.adoptFile(path, bytes, pw);
     a.notify(pw ? `Protegido com senha e salvo em ${path}. Guarde a senha: sem ela o arquivo não abre.`
       : `Restrições aplicadas e salvas em ${path}.`);
@@ -245,4 +285,47 @@ export async function exportImages(a: App): Promise<void> {
     const out = await engine.exportImages(dir, base(a), pages, dpi, fmt);
     a.notify(`${out.length} imagens gravadas em ${dir} (${fileName(out[0])} …)`);
   });
+}
+
+// ---------- converter ----------
+
+/** Converte o documento para Word (.docx): texto com fonte, tamanho e cor, parágrafos e imagens. */
+export async function toWord(a: App): Promise<void> {
+  if (a.scanned.length === a.doc!.info.pageCount) {
+    const ok = await a.ask({
+      kind: "confirm", title: "Converter para Word", okLabel: "Converter assim mesmo",
+      message: "Este documento parece escaneado: no Word, cada página vira uma imagem. Para ter texto editável, use antes Reconhecer texto (OCR).",
+    });
+    if (ok === null) return;
+  }
+  const path = await window.papiro.saveDialog(`${base(a)}.docx`, "docx");
+  if (!path) return;
+  await a.task("Convertendo para Word…", async () => {
+    const bytes = await engine.saveDocx(path);
+    a.notify(`Documento do Word salvo em ${path} (${size(bytes)}).`);
+  });
+}
+
+/** Converte o documento para texto puro (.txt). */
+export async function toText(a: App): Promise<void> {
+  const path = await window.papiro.saveDialog(`${base(a)}.txt`, "txt");
+  if (!path) return;
+  await a.task("Convertendo para texto…", async () => {
+    const chars = await engine.saveText(path);
+    a.notify(chars > 2 ? `Texto salvo em ${path}.` : `Arquivo salvo em ${path}, mas o documento quase não tem texto (é escaneado? use o OCR antes).`);
+  });
+}
+
+// ---------- remover marca d'água ----------
+
+/** Tira as marcas d'água reconhecidas de todas as páginas (dá para desfazer). */
+export async function removeWatermarks(a: App): Promise<void> {
+  const r = await a.task("Procurando marcas d'água…", () => engine.removeWatermarks());
+  if (!r) return;
+  if (!r.removed) {
+    a.notify("Nenhuma marca d'água reconhecida. Se for um carimbo, clique nele com Selecionar e exclua; se fizer parte de uma página escaneada, cubra com a redação.");
+    return;
+  }
+  await a.mutate("…", async () => r.info);
+  a.notify(`Marca d'água removida de ${r.pages} página(s). Ctrl+Z desfaz.`);
 }

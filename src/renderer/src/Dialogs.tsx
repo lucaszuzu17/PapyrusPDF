@@ -43,6 +43,7 @@ function Form() {
   const fields = d.fields ?? [];
   const [v, setV] = useState<FormValues>(() => Object.fromEntries(fields.map((f) => [f.id, f.value])));
   const [error, setError] = useState<string | null>(null);
+  const [reveal, setReveal] = useState(false); // senhas visíveis (depois de gerar uma)
   const set = (id: string, val: string | boolean) => { setV((old) => ({ ...old, [id]: val })); setError(null); };
   const ok = () => {
     const e = d.validate?.(v) ?? null;
@@ -63,15 +64,32 @@ function Form() {
                 <label><input type="checkbox" id={`f-${f.id}`} checked={!!v[f.id]} onChange={(e) => set(f.id, e.target.checked)} /> {f.label}</label>
               ) : (
                 <>
-                  <label htmlFor={`f-${f.id}`}>{f.label}</label>
+                  <div className="fld-head">
+                    <label htmlFor={`f-${f.id}`}>{f.label}</label>
+                    {f.action && (
+                      <button type="button" className="fld-action" onClick={() => { setV(f.action!.run(v)); setError(null); if (f.action!.reveal) setReveal(true); }}>
+                        {f.action.label}
+                      </button>
+                    )}
+                  </div>
                   {f.type === "select" ? (
                     <select {...common} value={String(v[f.id])} onChange={(e) => set(f.id, e.target.value)}>
                       {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                   ) : (
-                    <input {...common} type={f.type === "password" ? "password" : "text"} inputMode={f.type === "number" ? "numeric" : undefined}
+                    <input {...common} type={f.type === "password" && !reveal ? "password" : "text"} inputMode={f.type === "number" ? "numeric" : undefined}
                       placeholder={f.placeholder} value={String(v[f.id])} onChange={(e) => set(f.id, e.target.value)} />
                   )}
+                  {(() => {
+                    const n = f.note?.(v);
+                    if (!n) return null;
+                    return (
+                      <div className="fld-note" data-level={n.level ?? ""}>
+                        {n.level !== undefined && <span className="meter"><i style={{ width: `${(n.level + 1) * 20}%` }} /></span>}
+                        <span>{n.text}</span>
+                      </div>
+                    );
+                  })()}
                 </>
               )}
             </div>

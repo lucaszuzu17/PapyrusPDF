@@ -1,5 +1,5 @@
 // Gera os PDFs de teste em test/fixtures: node test/fixtures.ts
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PdfEngine, mupdf } from "../src/engine/core.ts";
 
@@ -79,10 +79,57 @@ export function form(): Uint8Array {
   return new TextEncoder().encode(out);
 }
 
+/** Calibri do Windows (null se não estiver instalada): a fonte do documento "com fonte embutida". */
+export const CALIBRI = join(process.env.WINDIR ?? "C:\\Windows", "Fonts", "calibri.ttf");
+
+/**
+ * PDF como os do Word: texto em Calibri embutida como subconjunto (prefixo "ABCDEF+" e ToUnicode só
+ * com as letras usadas). Letras fora do subconjunto (ex.: "z", "K") obrigam o editor a buscar a
+ * fonte no Windows. Devolve null se a Calibri não estiver instalada.
+ */
+export function embeddedFont(): Uint8Array | null {
+  if (!existsSync(CALIBRI)) return null;
+  const font = new mupdf.Font("Calibri", new Uint8Array(readFileSync(CALIBRI)));
+  const title = "Laudo de inspeção elétrica";
+  const lines = [
+    "Este relatório foi gerado com a fonte Calibri embutida no arquivo,",
+    "do jeito que o Word faz ao salvar em PDF: só as letras usadas.",
+  ];
+  const buf = new mupdf.Buffer();
+  const w = new mupdf.DocumentWriter(buf, "pdf", "");
+  const dev = w.beginPage([0, 0, 595, 842]);
+  const put = (size: number, x: number, y: number, s: string) => {
+    const t = new mupdf.Text();
+    t.showString(font, [size, 0, 0, -size, x, y], s);
+    dev.fillText(t, mupdf.Matrix.identity, mupdf.ColorSpace.DeviceRGB, [0.1, 0.12, 0.2], 1);
+  };
+  put(20, 72, 96, title);
+  lines.forEach((s, i) => put(12, 72, 140 + i * 16, s));
+  w.endPage(); w.close();
+  // vira um "subconjunto": prefixo no nome e ToUnicode só com as letras do texto
+  const doc = mupdf.Document.openDocument(new Uint8Array(buf.asUint8Array()), "application/pdf").asPDF()!;
+  const used = [...new Set(title + lines.join(""))];
+  const map = used.map((ch) => `<${font.encodeCharacter(ch.codePointAt(0)!).toString(16).padStart(4, "0")}> <${ch.charCodeAt(0).toString(16).padStart(4, "0")}>`);
+  const cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def " +
+    "/CMapName /Adobe-Identity-UCS def /CMapType 2 def 1 begincodespacerange <0000> <FFFF> endcodespacerange\n" +
+    `${map.length} beginbfchar\n${map.join("\n")}\nendbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end`;
+  doc.findPage(0).get("Resources").get("Font").forEach((ref) => {
+    const f = ref.resolve();
+    if (f.get("Subtype").asName() !== "Type0") return;
+    f.put("BaseFont", doc.newName("ABCDEF+Calibri"));
+    f.get("DescendantFonts").get(0).resolve().put("BaseFont", doc.newName("ABCDEF+Calibri"));
+    f.put("ToUnicode", doc.addStream(cmap, {}));
+  });
+  const out = doc.saveToBuffer("garbage,compress,objstms");
+  return new Uint8Array(out.asUint8Array());
+}
+
 if (import.meta.main) {
   writeFileSync(join(DIR, "amostra.pdf"), sample(3));
   writeFileSync(join(DIR, "escaneado.pdf"), scanned());
   writeFileSync(join(DIR, "formulario.pdf"), form());
+  const ef = embeddedFont();
+  if (ef) writeFileSync(join(DIR, "fontes.pdf"), ef); else console.log("Calibri não instalada: fontes.pdf não foi gerado");
   const f = new PdfEngine(); f.open(form());
   console.log("campos do formulário:", f.fields(0).map((x) => `${x.name}:${x.type}`).join(", "));
   console.log("fixtures em", DIR);

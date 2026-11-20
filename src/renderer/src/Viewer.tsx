@@ -6,7 +6,7 @@ import { useApp } from "./state.tsx";
 
 export function Viewer() {
   const app = useApp();
-  const { doc, zoom, gotoSignal, tool } = app;
+  const { doc, zoom, gotoSignal, tool, layout } = app;
   const box = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState<Set<number>>(new Set([0]));
   const prevZoom = useRef(zoom);
@@ -37,14 +37,16 @@ export function Viewer() {
     }, { root: el, rootMargin: "800px 0px" });
     el.querySelectorAll(".page").forEach((p) => io.observe(p));
     return () => io.disconnect();
-  }, [doc?.info.pageCount, doc?.rev, zoom]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [doc?.info.pageCount, doc?.rev, doc?.gen, zoom, layout]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // página atual = a que ocupa o topo da área visível
+  // página atual = a que ocupa o topo da área visível (em duas páginas, a da esquerda)
   const onScroll = () => {
     const el = box.current!;
     const mid = el.scrollTop + el.clientHeight * 0.3;
-    let cur = 0;
-    el.querySelectorAll<HTMLElement>(".page").forEach((p) => { if (p.offsetTop <= mid) cur = Number(p.dataset.page); });
+    let cur = 0, top = -1;
+    el.querySelectorAll<HTMLElement>(".page").forEach((p) => {
+      if (p.offsetTop <= mid && p.offsetTop > top) { cur = Number(p.dataset.page); top = p.offsetTop; }
+    });
     if (cur !== app.page) app.setPage(cur);
   };
 
@@ -56,6 +58,15 @@ export function Viewer() {
     const el = box.current?.querySelector<HTMLElement>(`.page[data-page="${target}"]`);
     if (el && box.current) box.current.scrollTop = el.offsetTop - 16;
   }, [gotoSignal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ao trocar entre uma e duas páginas, continua na mesma página
+  const prevLayout = useRef(layout);
+  useLayoutEffect(() => {
+    if (prevLayout.current === layout) return;
+    prevLayout.current = layout;
+    const el = box.current?.querySelector<HTMLElement>(`.page[data-page="${app.page}"]`);
+    if (el && box.current) box.current.scrollTop = el.offsetTop - 16;
+  }, [layout]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // manter a posição relativa ao mudar o zoom
   useLayoutEffect(() => {
@@ -98,9 +109,20 @@ export function Viewer() {
       }}
       onPointerUp={() => { pan.current = null; }}
     >
-      <div className="pages">
-        {doc.info.pages.map((p, i) => <PageView key={`${doc.gen}-${i}`} index={i} info={p} visible={visible.has(i)} />)}
-      </div>
+      {layout === "double" ? (
+        <div className="pages double">
+          {doc.info.pages.filter((_, i) => i % 2 === 0).map((_, k) => (
+            <div className="spread" key={`${doc.gen}-s${k}`}>
+              {[2 * k, 2 * k + 1].filter((i) => i < doc.info.pageCount).map((i) =>
+                <PageView key={`${doc.gen}-${i}`} index={i} info={doc.info.pages[i]} visible={visible.has(i)} />)}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="pages">
+          {doc.info.pages.map((p, i) => <PageView key={`${doc.gen}-${i}`} index={i} info={p} visible={visible.has(i)} />)}
+        </div>
+      )}
     </div>
   );
 }

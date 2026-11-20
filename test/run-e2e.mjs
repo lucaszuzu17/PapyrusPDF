@@ -9,10 +9,10 @@ import { resolve } from "node:path";
 const packaged = process.argv.includes("--packaged");
 const exe = packaged ? resolve("dist/win-unpacked/PapyrusPDF.exe") : electron;
 if (packaged && !existsSync(exe)) { console.error(`Não achei ${exe}. Rode "npm run dist" antes.`); process.exit(1); }
-if (!existsSync("test/fixtures/amostra.pdf")) spawnSync(process.execPath, ["test/fixtures.ts"], { stdio: "inherit" });
+if (!existsSync("test/fixtures/amostra.pdf") || !existsSync("test/fixtures/formulario.pdf")) spawnSync(process.execPath, ["test/fixtures.ts"], { stdio: "inherit" });
 let failed = 0;
 const only = process.argv.find((a) => a.startsWith("--only="))?.slice(7);
-for (const [f, scenario] of [["amostra", ""], ["formulario", ""], ["escaneado", ""], ["amostra", "recursos"]]) {
+for (const [f, scenario] of [["amostra", ""], ["formulario", ""], ["escaneado", ""], ["amostra", "recursos"], ["amostra", "abas"]]) {
   if (only && only !== (scenario || f)) continue;
   const pdf = resolve(`test/fixtures/${f}.pdf`);
   const r = spawnSync(exe, packaged ? [pdf] : ["out/main/index.js", pdf], {

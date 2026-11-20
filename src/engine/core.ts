@@ -1,13 +1,19 @@
 // Núcleo do editor: tudo o que mexe no PDF passa por aqui.
 // Não depende de Electron nem de interface — pode ser testado direto no Node.
 import * as mupdf from "mupdf";
+import { buildDocx, type DocxImage, type DocxPage, type DocxPara, type DocxRun } from "./docx.ts";
+import { fontStyle, stripSubset } from "./fontname.ts";
+import { originalSource, type GlyphSource } from "./fonts.ts";
+import { removePageWatermarks } from "./watermarks.ts";
 import type {
-  AnnotInfo, DocInfo, EditTextRequest, FieldInfo, NewAnnot, OutlineNode,
+  AnnotInfo, DocInfo, EditTextRequest, EditTextResult, FieldInfo, NewAnnot, OutlineNode,
   Point, Quad, Rect, RGB, SearchHit, TextBlock, TextLine,
 } from "./types.ts";
 
 export interface OcrWord { text: string; bbox: Rect } // bbox em pixels da imagem enviada
 export type Recognizer = (png: Uint8Array) => Promise<OcrWord[]>;
+/** Procura no sistema uma fonte equivalente à do PDF (usada quando a fonte embutida não tem alguma letra). */
+export type FontProvider = (pdfFontName: string) => { data: Uint8Array; subfont?: number; file?: string } | null;
 
 const FONT_KEY = "PapiroF";
 // "objstms" mantém os objetos em fluxos compactados: sem ele, PDFs do Word/Chrome crescem várias vezes ao salvar.
@@ -22,6 +28,12 @@ export class PdfEngine {
   private encrypted = false; // tem senha de abertura e/ou restrições
   private fontRefs = new Map<string, mupdf.PDFObject>();
   private gsRefs = new Map<string, mupdf.PDFObject>();
+  private sysFonts = new Map<string, { font: mupdf.Font; ref: mupdf.PDFObject; label: string }>();
+  private readonly fontProvider: FontProvider | null;
+
+  constructor(opts: { fonts?: FontProvider } = {}) {
+    this.fontProvider = opts.fonts ?? null;
+  }
 
   // ---------- documento ----------
 
@@ -75,8 +87,7 @@ export class PdfEngine {
     this.password = password;
     this.modified = false;
     this.encrypted = !doc.getTrailer().get("Encrypt").isNull();
-    this.fontRefs.clear();
-    this.gsRefs.clear();
+    this.forgetRefs();
     doc.enableJournal();
   }
 
@@ -181,13 +192,76 @@ export class PdfEngine {
     if (perm.copy) P |= 16 | 512;
     if (perm.annotate) P |= 32 | 256;
     const pSigned = P | 0; // inteiro de 32 bits com sinal
-    const src = this.scratch(this.serialize());
+    let base = this.serialize();
+    if (opts.recipient?.trim() || opts.imageOnly) base = this.recipientCopy(base, opts.recipient?.trim() ?? "", opts.imageOnly ?? 0);
+    const src = this.scratch(base);
     let o = `${SAVE_OPTIONS},encrypt=aes-256,owner-password=${owner},permissions=${pSigned}`;
     if (opts.userPassword) o += `,user-password=${opts.userPassword}`;
     const buf = src.saveToBuffer(o);
     const out = new Uint8Array(buf.asUint8Array());
     buf.destroy(); src.destroy();
     return out;
+  }
+
+  /**
+   * Bytes de uma cópia com o nome do destinatário (marca d'água no meio e rodapé em todas as páginas)
+   * e/ou com as páginas viradas imagem (`imageOnly` = resolução em dpi). O documento aberto não muda.
+   */
+  private recipientCopy(bytes: Uint8Array, recipient: string, imageOnly: number): Uint8Array {
+    const tmp = new PdfEngine();
+    try {
+      tmp.open(bytes, this.title, this.password);
+      if (recipient) {
+        const today = new Date().toLocaleDateString("pt-BR");
+        tmp.addWatermark({ text: `Cópia de ${recipient}`.slice(0, 80), opacity: 0.13, removable: false });
+        tmp.addHeaderFooter({ items: [{ pos: "bc", text: `Cópia exclusiva de ${recipient} — ${today} — não redistribuir` }], size: 7, margin: 14, color: [0.45, 0.45, 0.45] });
+      }
+      return imageOnly ? tmp.rasterize(imageOnly) : tmp.save();
+    } finally { tmp.close(); }
+  }
+
+  /**
+   * PDF novo em que cada página é uma imagem (JPEG) da página original, do mesmo tamanho.
+   * Texto, anotações e campos viram parte da imagem: não dá para copiar, pesquisar nem editar o texto.
+   */
+  rasterize(dpi = 150): Uint8Array {
+    const src = this.d();
+    const out = new mupdf.PDFDocument();
+    const n = src.countPages();
+    for (let i = 0; i < n; i++) {
+      const page = src.loadPage(i);
+      const [x0, y0, x1, y1] = page.getBounds();
+      const pix = page.toPixmap(mupdf.Matrix.scale(dpi / 72, dpi / 72), mupdf.ColorSpace.DeviceRGB, false, true);
+      const jpg = pix.asJPEG(85);
+      pix.destroy(); page.destroy();
+      const img = new mupdf.Image(jpg);
+      const w = x1 - x0, h = y1 - y0;
+      const res = out.newDictionary();
+      const xo = out.newDictionary();
+      xo.put("Im0", out.addImage(img));
+      res.put("XObject", xo);
+      out.insertPage(-1, out.addPage([0, 0, w, h], 0, res, `q ${n3(w)} 0 0 ${n3(h)} 0 0 cm /Im0 Do Q`));
+      img.destroy();
+    }
+    const title = src.getMetaData("info:Title");
+    if (title) out.setMetaData("info:Title", title);
+    const buf = out.saveToBuffer(SAVE_OPTIONS);
+    const bytes = new Uint8Array(buf.asUint8Array());
+    buf.destroy(); out.destroy();
+    return bytes;
+  }
+
+  /**
+   * Remove as marcas d'água de todas as páginas (as marcadas como tal pelo Acrobat, Foxit e PapyrusPDF,
+   * camadas de marca d'água e a do Word). Pode ser desfeito.
+   */
+  removeWatermarks(): { removed: number; pages: number; info: DocInfo } {
+    const doc = this.d();
+    const n = doc.countPages();
+    const hit = Array.from({ length: n }, (_, i) => i).filter((i) => removePageWatermarks(doc, i, true) > 0);
+    let removed = 0;
+    if (hit.length) this.op("Remover marca d'água", () => { for (const i of hit) removed += removePageWatermarks(doc, i); });
+    return { removed, pages: hit.length, info: this.info() };
   }
 
   /** Cópia sem senha nem restrições (o documento precisa estar desbloqueado). */
@@ -285,6 +359,8 @@ export class PdfEngine {
   private forgetRefs(): void {
     this.fontRefs.clear();
     this.gsRefs.clear();
+    for (const f of this.sysFonts.values()) f.font.destroy();
+    this.sysFonts.clear();
   }
 
   // ---------- visualização ----------
@@ -607,12 +683,21 @@ export class PdfEngine {
   // ---------- editar texto ----------
 
   /**
-   * Substitui o texto de uma área: remove só os glifos de texto da área
-   * (imagens e vetores ficam) e escreve o texto novo numa fonte Base-14 parecida.
+   * Substitui o texto de uma área: remove só os glifos de texto da área (imagens e vetores ficam)
+   * e escreve o texto novo. Cada letra sai, nesta ordem de preferência:
+   * 1. na própria fonte embutida no PDF, quando ela tem a letra (o trecho continua igual ao resto);
+   * 2. na mesma fonte instalada no Windows, embutida no PDF (só quando faltou alguma letra);
+   * 3. numa das 14 fontes padrão do PDF, parecida com a original.
    */
-  editText(req: EditTextRequest): DocInfo {
+  editText(req: EditTextRequest): EditTextResult {
+    const used = { original: null as string | null, system: null as string | null, fallback: false };
     this.op("Editar texto", () => {
       const page = this.d().loadPage(req.page);
+      const want = req.text.replace(/\n/g, "");
+      // A fonte original é escolhida antes da redação, que pode tirar dos recursos da página
+      // uma fonte que só esse trecho usava (o objeto continua no documento).
+      const seen = this.charsByFont(page).get(req.font) ?? new Set<string>();
+      const orig = originalSource(page.getObject(), req.font, want, seen);
       const red = page.createAnnotation("Redact");
       red.setRect(pad(req.area, 0.5));
       red.update();
@@ -620,20 +705,216 @@ export class PdfEngine {
         mupdf.PDFPage.REDACT_TEXT_REMOVE);
       page.destroy();
 
-      const base = base14For(req.font);
-      const font = new mupdf.Font(base);
-      const lines = wrap(req.text, font, req.size, req.maxWidth);
+      const b14 = this.base14Source(base14For(req.font));
+      const sources: GlyphSource[] = orig ? [orig] : [];
+      const missing = [...new Set(want)].filter((ch) => !orig?.glyph(ch));
+      // Arial, Times e Courier têm equivalentes entre as fontes padrão: não vale embutir a do Windows por elas
+      const standard = ["Arial", "Times New Roman", "Courier New"].includes(fontStyle(req.font).family);
+      if (missing.length && !(standard && missing.every((ch) => b14.glyph(ch)))) {
+        const sys = this.systemSource(req.font);
+        if (sys && missing.some((ch) => sys.glyph(ch))) sources.push(sys);
+      }
+      sources.push(b14);
+      const pick = (ch: string) => {
+        for (const s of sources) { const g = s.glyph(ch); if (g) return { s, g }; }
+        return { s: b14, g: b14.glyph("?")! };
+      };
+      const measure = (t: string) => ([...t].reduce((w, ch) => w + pick(ch).g.w, 0) / 1000) * req.size;
+      const lines = wrapMeasured(req.text, measure, req.maxWidth);
       const lh = req.lineHeight ?? req.size * 1.2;
+      const fonts: Record<string, mupdf.PDFObject> = {};
       let ops = `BT\n${rg(req.color)}\n`;
       lines.forEach((ln, k) => {
-        ops += `/${this.fontKey(base)} ${n3(req.size)} Tf\n`;
-        ops += `1 0 0 -1 ${n3(req.origin[0])} ${n3(req.origin[1] + k * lh)} Tm\n<${winAnsiHex(ln)}> Tj\n`;
+        ops += `1 0 0 -1 ${n3(req.origin[0])} ${n3(req.origin[1] + k * lh)} Tm\n`;
+        let cur: GlyphSource | null = null, hex = "";
+        const flush = () => { if (cur && hex) ops += `/${cur.key} ${n3(req.size)} Tf <${hex}> Tj\n`; hex = ""; };
+        for (const ch of ln) {
+          const { s, g } = pick(ch);
+          if (s !== cur) { flush(); cur = s; }
+          hex += g.code.toString(16).padStart(s.twoByte ? 4 : 2, "0");
+          fonts[s.key] = s.ref;
+          if (!ch.trim()) continue;
+          if (s.kind === "original") used.original = s.label;
+          else if (s.kind === "system") used.system = s.label;
+          else used.fallback = true;
+        }
+        flush();
       });
       ops += "ET";
-      this.appendContent(req.page, ops, [base]);
-      font.destroy();
+      this.appendContent(req.page, ops, fonts);
     });
-    return this.info();
+    return { info: this.info(), fonts: used };
+  }
+
+  /** Caracteres que a página desenha com cada fonte (pelo nome da fonte). */
+  private charsByFont(page: mupdf.PDFPage): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    const st = page.toStructuredText("preserve-whitespace");
+    st.walk({
+      onChar(c, _o, font) {
+        const n = font.getName();
+        let set = out.get(n);
+        if (!set) out.set(n, (set = new Set()));
+        set.add(c);
+      },
+    });
+    st.destroy();
+    return out;
+  }
+
+  /** Uma das 14 fontes padrão do PDF (WinAnsi; não precisa ser embutida). */
+  private base14Source(base: string): GlyphSource {
+    const font = base14Font(base);
+    return {
+      kind: "base14", key: this.fontKey(base), ref: this.base14Ref(base), twoByte: false, label: base,
+      glyph: (ch) => {
+        const b = winAnsiByte(ch);
+        return b === null ? null : { code: b, w: font.advanceGlyph(font.encodeCharacter(ch.codePointAt(0)!), 0) * 1000 };
+      },
+    };
+  }
+
+  /** A fonte do Windows equivalente à do PDF, embutida no documento (uma vez por fonte). */
+  private systemSource(fontName: string): GlyphSource | null {
+    if (!this.fontProvider) return null;
+    let found: ReturnType<FontProvider>;
+    try { found = this.fontProvider(fontName); } catch { found = null; }
+    if (!found) return null;
+    const id = `${found.file ?? stripSubset(fontName)}#${found.subfont ?? 0}`;
+    let e = this.sysFonts.get(id);
+    if (!e) {
+      let font: mupdf.Font;
+      try { font = new mupdf.Font(stripSubset(fontName), found.data, found.subfont ?? 0); } catch { return null; }
+      // por um documento temporário: doc.addFont guarda um cache que sobrevive ao desfazer
+      const tmp = new mupdf.PDFDocument();
+      let ref: mupdf.PDFObject;
+      try { ref = this.d().graftObject(tmp.addFont(font)); } finally { tmp.destroy(); }
+      e = { font, ref, label: fontStyle(fontName).family };
+      this.sysFonts.set(id, e);
+    }
+    const { font, ref, label } = e;
+    return {
+      kind: "system", key: `PapiroS${ref.asIndirect()}`, ref, twoByte: true, label,
+      glyph: (ch) => {
+        const gid = font.encodeCharacter(ch.codePointAt(0)!);
+        return gid > 0 ? { code: gid, w: font.advanceGlyph(gid, 0) * 1000 } : null;
+      },
+    };
+  }
+
+  // ---------- converter ----------
+
+  /** Texto de todas as páginas (para "Converter → Texto"). */
+  exportText(): string {
+    const n = this.d().countPages();
+    const parts: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const page = this.d().loadPage(i);
+      const st = page.toStructuredText("preserve-whitespace");
+      parts.push(st.asText().replace(/[ \t]+\n/g, "\n").trimEnd());
+      st.destroy(); page.destroy();
+    }
+    return parts.join("\n\n").replace(/\r?\n/g, "\r\n") + "\r\n";
+  }
+
+  /** Documento do Word (.docx) com o texto, a formatação básica e as imagens de cada página. */
+  exportDocx(progress?: (done: number, total: number) => void): Uint8Array {
+    const n = this.d().countPages();
+    const pages: DocxPage[] = [];
+    for (let i = 0; i < n; i++) {
+      progress?.(i, n);
+      pages.push(this.docxPage(i));
+    }
+    progress?.(n, n);
+    return buildDocx(pages, this.d().getMetaData("info:Title") || this.title);
+  }
+
+  private docxPage(index: number): DocxPage {
+    const page = this.d().loadPage(index);
+    const [px0, py0, px1, py1] = page.getBounds();
+    const W = px1 - px0, H = py1 - py0;
+    type Ch = { c: string; font: string; bold: boolean; italic: boolean; size: number; color: RGB };
+    type Ln = { bbox: Rect; chars: Ch[] };
+    type Blk = { bbox: Rect; lines: Ln[] };
+    type Img = { bbox: Rect; data: Uint8Array; ext: "png" | "jpeg" };
+    const texts: Blk[] = [];
+    const images: Img[] = [];
+    let block: Blk | null = null;
+    let line: Ln | null = null;
+    const st = page.toStructuredText("preserve-whitespace,preserve-images");
+    st.walk({
+      onImageBlock(bbox, _m, image) {
+        const r = bbox as Rect;
+        if (r[2] - r[0] < 6 || r[3] - r[1] < 6) return;
+        const out = imageForDocx(image);
+        if (out) images.push({ bbox: r, ...out });
+      },
+      beginTextBlock(bbox) { block = { bbox: bbox as Rect, lines: [] }; },
+      beginLine(bbox) { line = { bbox: bbox as Rect, chars: [] }; },
+      onChar(c, _o, font, size, _q, color) {
+        line?.chars.push({ c, font: font.getName(), bold: font.isBold(), italic: font.isItalic(), size, color: toRGB(color as number[]) });
+      },
+      endLine() { if (block && line && line.chars.length) block.lines.push(line); line = null; },
+      endTextBlock() { if (block && block.lines.length) texts.push(block); block = null; },
+    });
+    st.destroy(); page.destroy();
+
+    const all = [...texts.map((t) => t.bbox), ...images.map((i) => i.bbox)];
+    const clamp = (v: number) => Math.min(90, Math.max(18, v));
+    const margins = all.length
+      ? { left: clamp(Math.min(...all.map((b) => b[0])) - px0), top: clamp(Math.min(...all.map((b) => b[1])) - py0), right: clamp(px1 - Math.max(...all.map((b) => b[2]))), bottom: 36 }
+      : { left: 72, top: 72, right: 72, bottom: 72 };
+    const contentW = Math.max(72, W - margins.left - margins.right);
+    const left = px0 + margins.left;
+    const centerX = left + contentW / 2;
+
+    // as imagens entram no fluxo antes do primeiro bloco de texto que começa abaixo delas
+    type Item = { kind: "t"; b: Blk } | { kind: "i"; b: Img };
+    const flow: Item[] = texts.map((b) => ({ kind: "t" as const, b }));
+    for (const img of [...images].sort((a, b) => a.bbox[1] - b.bbox[1])) {
+      const at = flow.findIndex((it) => it.b.bbox[1] > img.bbox[1] + 1);
+      flow.splice(at < 0 ? flow.length : at, 0, { kind: "i", b: img });
+    }
+
+    const items: (DocxPara | DocxImage)[] = [];
+    let bottom = py0 + margins.top;
+    for (const it of flow) {
+      const r = it.b.bbox;
+      const spaceBefore = Math.min(144, Math.max(0, r[1] - bottom));
+      const indent = Math.max(0, r[0] - left);
+      bottom = Math.max(bottom, r[3]);
+      if (it.kind === "i") {
+        let w = r[2] - r[0], h = r[3] - r[1];
+        if (w > contentW) { h *= contentW / w; w = contentW; }
+        const maxH = H - margins.top - margins.bottom - 24;
+        if (h > maxH) { w *= maxH / h; h = maxH; }
+        items.push({ kind: "img", data: it.b.data, ext: it.b.ext, width: w, height: h, indent: Math.max(0, Math.min(indent, contentW - w)), spaceBefore });
+        continue;
+      }
+      const lines = it.b.lines;
+      const runs: DocxRun[] = [];
+      const push = (c: Ch, text: string) => {
+        const fs = fontStyle(c.font);
+        const run: DocxRun = { text, family: fs.family, size: Math.round(c.size * 2) / 2, color: c.color, bold: c.bold || fs.bold, italic: c.italic || fs.italic };
+        const last = runs[runs.length - 1];
+        if (last && last.family === run.family && last.size === run.size && last.bold === run.bold && last.italic === run.italic && last.color.join() === run.color.join()) last.text += text;
+        else runs.push(run);
+      };
+      lines.forEach((ln, k) => {
+        for (const c of ln.chars) push(c, c.c);
+        if (k === lines.length - 1) return;
+        // linha curta termina o parágrafo do PDF ali (quebra); linha cheia continua na seguinte
+        const last = ln.chars[ln.chars.length - 1];
+        const text = ln.chars.map((c) => c.c).join("");
+        if (r[2] - ln.bbox[2] > (ln.chars[0].size || 10) * 3) push(last, "\n");
+        else if (!/[\s-]$/.test(text)) push(last, " ");
+      });
+      const tail = runs[runs.length - 1];
+      if (tail) tail.text = tail.text.replace(/\s+$/, "");
+      const align = alignOf(lines.map((l) => l.bbox), r, centerX, contentW, left);
+      items.push({ kind: "p", runs: runs.filter((x) => x.text), indent: align === "left" || align === "both" ? indent : 0, spaceBefore, align });
+    }
+    return { width: W, height: H, margins, items };
   }
 
   // ---------- cabeçalho, rodapé, numeração e marca d'água ----------
@@ -672,7 +953,7 @@ export class PdfEngine {
           ops += `/${this.fontKey("Helvetica")} ${n3(size)} Tf 1 0 0 -1 ${n3(x)} ${n3(y)} Tm <${winAnsiHex(text)}> Tj\n`;
         }
         ops += "ET";
-        this.appendContent(index, ops, ["Helvetica"]);
+        this.appendContent(index, ops, this.b14("Helvetica"));
       });
     });
     font.destroy();
@@ -687,7 +968,10 @@ export class PdfEngine {
     const base = "Helvetica-Bold";
     const font = new mupdf.Font(base);
     const opacity = Math.min(1, Math.max(0.05, spec.opacity ?? 0.18));
-    const gs = `PapiroGS${Math.round(opacity * 100)}`;
+    // A marca comum é marcada como marca d'água (o comando "Remover marca d'água" a encontra, como
+    // as do Acrobat e do Foxit). A marca de destinatário não leva essa etiqueta nem o nome PapiroGS.
+    const removable = spec.removable ?? true;
+    const gs = `${removable ? "PapiroGS" : "PapiroGR"}${Math.round(opacity * 100)}`;
     const ang = ((spec.angle ?? 45) * Math.PI) / 180;
     const c = Math.cos(ang), s = Math.sin(ang);
     this.op("Marca d'água", () => {
@@ -703,9 +987,10 @@ export class PdfEngine {
         const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
         const x = cx - (w / 2) * c + (h / 2) * s;
         const y = cy + (w / 2) * s + (h / 2) * c;
-        const ops = `/${gs} gs BT ${rg(spec.color ?? [0.6, 0.6, 0.6])} /${this.fontKey(base)} ${n3(size)} Tf ` +
+        let ops = `/${gs} gs BT ${rg(spec.color ?? [0.6, 0.6, 0.6])} /${this.fontKey(base)} ${n3(size)} Tf ` +
           `${n3(c)} ${n3(-s)} ${n3(-s)} ${n3(-c)} ${n3(x)} ${n3(y)} Tm <${winAnsiHex(spec.text)}> Tj ET`;
-        this.appendContent(index, ops, [base], { [gs]: opacity }, spec.behind ?? false);
+        if (removable) ops = `/Artifact <</Type /Pagination /Subtype /Watermark>> BDC q ${ops} Q EMC`;
+        this.appendContent(index, ops, this.b14(base), { [gs]: opacity }, spec.behind ?? false);
       }
     });
     font.destroy();
@@ -792,7 +1077,7 @@ export class PdfEngine {
     }
     ops += "ET";
     font.destroy();
-    this.op("OCR", () => this.appendContent(index, ops, ["Helvetica"]));
+    this.op("OCR", () => this.appendContent(index, ops, this.b14("Helvetica")));
     return { words: words.length, info: this.info() };
   }
 
@@ -821,12 +1106,35 @@ export class PdfEngine {
     return FONT_KEY + base.replace(/[^A-Za-z]/g, "");
   }
 
+  /** Objeto de uma fonte padrão (Base-14) neste documento, criado na primeira vez. */
+  private base14Ref(base: string): mupdf.PDFObject {
+    let ref = this.fontRefs.get(base);
+    if (!ref) {
+      // Montada à mão: doc.addSimpleFont guarda a fonte num cache do MuPDF que sobrevive
+      // ao desfazer e devolveria a referência de um objeto já apagado.
+      const doc = this.d();
+      const f = doc.newDictionary();
+      f.put("Type", doc.newName("Font"));
+      f.put("Subtype", doc.newName("Type1"));
+      f.put("BaseFont", doc.newName(base));
+      f.put("Encoding", doc.newName("WinAnsiEncoding"));
+      ref = doc.addObject(f);
+      this.fontRefs.set(base, ref);
+    }
+    return ref;
+  }
+
+  /** Recursos de fonte para `appendContent` com uma fonte padrão. */
+  private b14(base: string): Record<string, mupdf.PDFObject> {
+    return { [this.fontKey(base)]: this.base14Ref(base) };
+  }
+
   /**
    * Acrescenta operadores ao fim do conteúdo da página. O conteúdo original
    * fica isolado em q/Q, e o novo é desenhado no espaço de página do MuPDF
    * (y para baixo) graças à matriz inversa da transformação da página.
    */
-  private appendContent(index: number, ops: string, fonts: string[], gstates: Record<string, number> = {}, behind = false): void {
+  private appendContent(index: number, ops: string, fonts: Record<string, mupdf.PDFObject>, gstates: Record<string, number> = {}, behind = false): void {
     const doc = this.d();
     const page = doc.loadPage(index);
     const pageObj = page.getObject();
@@ -837,21 +1145,7 @@ export class PdfEngine {
     if (res.isNull()) { pageObj.put("Resources", doc.newDictionary()); res = pageObj.get("Resources"); }
     if (res.get("Font").isNull()) res.put("Font", doc.newDictionary());
     const fontDict = res.get("Font");
-    for (const base of fonts) {
-      let ref = this.fontRefs.get(base);
-      if (!ref) {
-        // Montada à mão: doc.addSimpleFont guarda a fonte num cache do MuPDF que sobrevive
-        // ao desfazer e devolveria a referência de um objeto já apagado.
-        const f = doc.newDictionary();
-        f.put("Type", doc.newName("Font"));
-        f.put("Subtype", doc.newName("Type1"));
-        f.put("BaseFont", doc.newName(base));
-        f.put("Encoding", doc.newName("WinAnsiEncoding"));
-        ref = doc.addObject(f);
-        this.fontRefs.set(base, ref);
-      }
-      fontDict.put(this.fontKey(base), ref);
-    }
+    for (const [key, ref] of Object.entries(fonts)) fontDict.put(key, ref);
     if (Object.keys(gstates).length) {
       if (res.get("ExtGState").isNull()) res.put("ExtGState", doc.newDictionary());
       const gsDict = res.get("ExtGState");
@@ -898,6 +1192,10 @@ export interface ProtectOptions {
   userPassword?: string;  // pedida para abrir (opcional)
   ownerPassword?: string; // libera as permissões
   permissions: { print: boolean; copy: boolean; edit: boolean; annotate: boolean };
+  /** Nome de quem vai receber: vira marca d'água e rodapé na cópia (o documento aberto não muda). */
+  recipient?: string;
+  /** Páginas viram imagem nesta resolução (dpi): dificulta copiar e editar o texto. 0 = não. */
+  imageOnly?: number;
 }
 
 export type MarginPos = "tl" | "tc" | "tr" | "bl" | "bc" | "br";
@@ -912,6 +1210,8 @@ export interface HeaderFooterSpec {
 
 export interface WatermarkSpec {
   text: string;
+  /** Marcada como marca d'água, para "Remover marca d'água" achar (padrão). Falso na marca de destinatário. */
+  removable?: boolean;
   pages?: number[];
   size?: number; // automático se omitido
   opacity?: number;
@@ -1028,19 +1328,60 @@ export function textWidth(s: string, font: mupdf.Font, size: number): number {
   return w * size;
 }
 
-function wrap(text: string, font: mupdf.Font, size: number, maxWidth?: number): string[] {
+function wrapMeasured(text: string, measure: (s: string) => number, maxWidth?: number): string[] {
   const out: string[] = [];
   for (const para of text.split("\n")) {
     if (!maxWidth) { out.push(para); continue; }
     let cur = "";
     for (const word of para.split(/(\s+)/)) {
       const next = cur + word;
-      if (cur && textWidth(next.trimEnd(), font, size) > maxWidth) { out.push(cur.trimEnd()); cur = word.trimStart(); }
+      if (cur && measure(next.trimEnd()) > maxWidth) { out.push(cur.trimEnd()); cur = word.trimStart(); }
       else cur = next;
     }
     out.push(cur);
   }
   return out;
+}
+
+/** Alinhamento de um bloco de texto (para o .docx). */
+function alignOf(lines: Rect[], block: Rect, centerX: number, contentW: number, left: number): DocxPara["align"] {
+  if (!lines.length) return "left";
+  const bw = block[2] - block[0];
+  const mids = lines.map((l) => (l[0] + l[2]) / 2), rights = lines.map((l) => l[2]), lefts = lines.map((l) => l[0]);
+  const spread = (v: number[]) => Math.max(...v) - Math.min(...v);
+  if (bw < contentW * 0.8 && spread(mids) < 3 && Math.abs((block[0] + block[2]) / 2 - centerX) < 15 && (lines.length > 1 || block[0] - left > 20)) return "center";
+  if (lines.length > 1 && spread(rights) < 2 && spread(lefts) > 6 && block[2] > left + contentW - 15) return "right";
+  if (lines.length >= 3 && spread(rights.slice(0, -1)) < 1.5 && bw > contentW * 0.6) return "both";
+  return "left";
+}
+
+const base14Fonts = new Map<string, mupdf.Font>();
+function base14Font(base: string): mupdf.Font {
+  let f = base14Fonts.get(base);
+  if (!f) base14Fonts.set(base, (f = new mupdf.Font(base)));
+  return f;
+}
+
+/** Imagem de um bloco do texto estruturado → PNG (com transparência ou preto e branco) ou JPEG, com no máximo 2400 px. */
+function imageForDocx(image: mupdf.Image): { data: Uint8Array; ext: "png" | "jpeg" } | null {
+  if (image.getImageMask()) return null;
+  let p0: mupdf.Pixmap | undefined, p1: mupdf.Pixmap | undefined, p2: mupdf.Pixmap | undefined;
+  try {
+    p0 = image.toPixmap();
+    const alpha = p0.getAlpha() > 0;
+    const gray = p0.getColorSpace()?.isGray() === true;
+    p1 = p0.convertToColorSpace(gray ? mupdf.ColorSpace.DeviceGray : mupdf.ColorSpace.DeviceRGB, alpha);
+    const w = p1.getWidth(), h = p1.getHeight(), big = Math.max(w, h);
+    if (big > 2400) {
+      const s = 2400 / big;
+      p2 = p1.warp([[0, 0], [w, 0], [w, h], [0, h]], Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s)));
+    }
+    const px = p2 ?? p1;
+    const png = alpha || image.getBitsPerComponent() === 1;
+    return { data: new Uint8Array(png ? px.asPNG() : px.asJPEG(85)), ext: png ? "png" : "jpeg" };
+  } catch {
+    return null;
+  } finally { p2?.destroy(); p1?.destroy(); p0?.destroy(); }
 }
 
 // Unicode → Windows-1252 (WinAnsiEncoding), em hexadecimal para o operador Tj.
@@ -1050,6 +1391,15 @@ const CP1252: Record<number, number> = {
   0x2019: 0x92, 0x201c: 0x93, 0x201d: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97, 0x02dc: 0x98,
   0x2122: 0x99, 0x0161: 0x9a, 0x203a: 0x9b, 0x0153: 0x9c, 0x017e: 0x9e, 0x0178: 0x9f,
 };
+
+/** Byte Windows-1252 do caractere, ou null se ele não existe nessa codificação. */
+export function winAnsiByte(ch: string): number | null {
+  const u = ch.codePointAt(0)!;
+  if ((u >= 0x20 && u <= 0x7e) || (u >= 0xa0 && u <= 0xff)) return u;
+  if (CP1252[u] !== undefined) return CP1252[u];
+  if (u === 0x09) return 0x20;
+  return null;
+}
 
 export function winAnsiHex(s: string): string {
   let hex = "";

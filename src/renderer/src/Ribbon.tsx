@@ -3,7 +3,7 @@ import { useState } from "react";
 import { engine } from "./api.ts";
 import * as feat from "./features.ts";
 import { Icon } from "./icons.tsx";
-import { useApp, type RGB, type Tool } from "./state.tsx";
+import { OCR_LANGS, useApp, type RGB, type Tool } from "./state.tsx";
 
 type App = ReturnType<typeof useApp>;
 
@@ -15,9 +15,11 @@ interface Cmd {
   run?: (a: App) => unknown;
   needsDoc?: boolean;
   enabled?: (a: App) => boolean;
+  /** Botão de liga/desliga: aparece marcado quando devolve true. */
+  on?: (a: App) => boolean;
   title?: string;
 }
-interface Group { label: string; cmds: (Cmd | "color")[] }
+interface Group { label: string; cmds: (Cmd | "color" | "ocrlang")[] }
 interface Tab { id: string; label: string; groups: Group[] }
 
 /** Páginas-alvo das ações de organizar: seleção do organizador, senão a página atual. */
@@ -38,7 +40,6 @@ const TABS: Tab[] = [
       ] },
       { label: "Exportar", cmds: [
         { id: "compress", label: "Comprimir", icon: "compress", needsDoc: true, run: feat.compress, title: "Gravar uma cópia menor (reduz as imagens)" },
-        { id: "toImg", label: "Como imagem", icon: "imageOut", needsDoc: true, run: feat.exportImages, title: "Salvar páginas como PNG ou JPEG" },
       ] },
       { label: "Ferramentas", cmds: [
         { id: "select", label: "Selecionar", icon: "select", tool: "select", needsDoc: true },
@@ -48,11 +49,26 @@ const TABS: Tab[] = [
         { id: "zoomOut", label: "Reduzir", icon: "zoomOut", needsDoc: true, run: (a) => a.setZoom((z) => z / 1.2) },
         { id: "zoomIn", label: "Ampliar", icon: "zoomIn", needsDoc: true, run: (a) => a.setZoom((z) => z * 1.2) },
         { id: "fit", label: "Ajustar largura", icon: "fitWidth", needsDoc: true, run: (a) => a.fitWidth() },
-        { id: "organize", label: "Organizar", icon: "grid", needsDoc: true, run: (a) => a.setView(a.view === "organize" ? "read" : "organize") },
+        { id: "two", label: "Duas páginas", icon: "twoPages", needsDoc: true, on: (a) => a.layout === "double",
+          run: (a) => a.setLayout(a.layout === "double" ? "single" : "double"), title: "Mostrar duas páginas lado a lado" },
+        { id: "full", label: "Tela cheia", icon: "fullscreen", needsDoc: true, run: (a) => a.toggleFullScreen(true), title: "Só o documento na tela (F11; Esc sai)" },
       ] },
       { label: "Histórico", cmds: [
         { id: "undo", label: "Desfazer", icon: "undo", needsDoc: true, enabled: (a) => !!a.doc?.info.canUndo, run: (a) => a.undo(), title: "Desfazer (Ctrl+Z)" },
         { id: "redo", label: "Refazer", icon: "redo", needsDoc: true, enabled: (a) => !!a.doc?.info.canRedo, run: (a) => a.redo(), title: "Refazer (Ctrl+Y)" },
+      ] },
+    ],
+  },
+  {
+    id: "convert", label: "Converter", groups: [
+      { label: "Do PDF para", cmds: [
+        { id: "toWord", label: "Word", icon: "toWord", needsDoc: true, run: feat.toWord, title: "Documento do Word (.docx) com texto, formatação e imagens" },
+        { id: "toText", label: "Texto", icon: "toText", needsDoc: true, run: feat.toText, title: "Arquivo de texto (.txt) com o texto de todas as páginas" },
+        { id: "toImg2", label: "Imagem", icon: "imageOut", needsDoc: true, run: feat.exportImages, title: "Salvar páginas como PNG ou JPEG" },
+      ] },
+      { label: "Para PDF", cmds: [
+        { id: "fromImg2", label: "De imagens", icon: "image", run: (a) => a.newFromImages(), title: "Criar um PDF a partir de fotos ou imagens" },
+        { id: "merge2", label: "Combinar", icon: "merge", run: (a) => a.mergeFiles(), title: "Combinar vários PDFs em um" },
       ] },
     ],
   },
@@ -90,6 +106,8 @@ const TABS: Tab[] = [
         { id: "hf", label: "Cabeçalho e rodapé", icon: "header", needsDoc: true, run: feat.headerFooter, title: "Texto nas margens de todas as páginas" },
         { id: "num", label: "Numerar páginas", icon: "number", needsDoc: true, run: feat.numberPages },
         { id: "wm", label: "Marca d'água", icon: "watermark", needsDoc: true, run: feat.watermark, title: "Texto grande e transparente no meio das páginas" },
+        { id: "wmOff", label: "Remover marca d'água", icon: "watermarkOff", needsDoc: true, run: feat.removeWatermarks,
+          title: "Tira as marcas d'água do Word, Acrobat, Foxit e PapyrusPDF de todas as páginas" },
       ] },
       { label: "Histórico", cmds: [
         { id: "undo2", label: "Desfazer", icon: "undo", needsDoc: true, enabled: (a) => !!a.doc?.info.canUndo, run: (a) => a.undo() },
@@ -172,7 +190,8 @@ const TABS: Tab[] = [
   },
   {
     id: "ocr", label: "Reconhecer texto", groups: [
-      { label: "OCR (português)", cmds: [
+      { label: "Idioma do texto", cmds: ["ocrlang"] },
+      { label: "Reconhecer (OCR)", cmds: [
         { id: "ocr1", label: "Esta página", icon: "ocr", needsDoc: true, run: (a) => a.runOcr([a.page]) },
         { id: "ocrScan", label: "Páginas escaneadas", icon: "ocrAll", needsDoc: true, enabled: (a) => a.scanned.length > 0,
           run: (a) => a.runOcr("scanned"), title: "Só as páginas sem texto" },
@@ -205,7 +224,14 @@ export function Ribbon() {
           <section key={g.label} className="rgroup">
             <div className="rgroup-cmds">
               {g.cmds.map((c) =>
-                c === "color" ? (
+                c === "ocrlang" ? (
+                  <label key="ocrlang" className="ocrlang">
+                    <Icon name="language" size={20} />
+                    <select aria-label="Idioma do OCR" value={a.ocrLang} disabled={!!a.busy} onChange={(e) => a.setOcrLang(e.target.value)}>
+                      {OCR_LANGS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+                    </select>
+                  </label>
+                ) : c === "color" ? (
                   <div key="color" className="swatches">
                     {SWATCHES.map((s) => (
                       <button key={s.join()} title="Cor das marcações" className={s.join() === a.color.join() ? "sw on" : "sw"}
@@ -213,7 +239,8 @@ export function Ribbon() {
                     ))}
                   </div>
                 ) : (
-                  <button key={c.id} className={c.tool && a.tool === c.tool ? "rbtn on" : "rbtn"} title={c.title ?? c.label}
+                  <button key={c.id} className={(c.tool && a.tool === c.tool) || c.on?.(a) ? "rbtn on" : "rbtn"} title={c.title ?? c.label}
+                    aria-pressed={c.on ? !!c.on(a) : undefined}
                     disabled={(c.needsDoc && !a.doc) || (c.enabled ? !c.enabled(a) : false) || !!a.busy}
                     onClick={() => { if (c.tool) { a.setTool(c.tool); a.setView("read"); } c.run?.(a); }}>
                     <Icon name={c.icon} size={22} />

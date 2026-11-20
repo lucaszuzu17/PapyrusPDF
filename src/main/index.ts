@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
 import { cpSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -83,13 +83,15 @@ const engineFailed = (why: unknown) => {
 };
 worker?.on("error", engineFailed);
 worker?.on("exit", () => engineFailed(null));
-const callEngine = (method: string, args: unknown[]) =>
+/** Aba em primeiro plano (a interface avisa a cada troca); é o documento padrão das chamadas. */
+let activeDoc = 0;
+const callEngine = (method: string, args: unknown[], doc = activeDoc) =>
   new Promise((resolve, reject) => {
     if (!worker) return reject(new Error("Motor indisponível."));
     if (engineDead) return reject(new Error(engineDead));
     const id = ++seq;
     waiting.set(id, { resolve, reject });
-    worker.postMessage({ id, method, args });
+    worker.postMessage({ id, doc, method, args });
   });
 
 // ---------- arquivos recentes ----------
@@ -137,11 +139,14 @@ function createWindow(): void {
       buttons: ["Sair sem salvar", "Cancelar"],
       defaultId: 1,
       cancelId: 1,
-      message: "Há alterações não salvas.",
+      message: "Há documentos com alterações não salvas.",
       detail: "Se sair agora, as alterações feitas desde o último salvamento serão perdidas.",
     });
     if (r === 1) e.preventDefault();
   });
+  // tela cheia: a interface esconde as barras; sair pelo Esc ou pelo Windows também avisa
+  win.on("enter-full-screen", () => win?.webContents.send("fullscreen", true));
+  win.on("leave-full-screen", () => win?.webContents.send("fullscreen", false));
   win.on("closed", () => { win = null; rendererReady = false; });
   win.webContents.on("did-start-loading", () => { rendererReady = false; });
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -168,7 +173,7 @@ function createWindow(): void {
 }
 
 // ---------- IPC ----------
-ipcMain.handle("engine", (_e, method: string, args: unknown[]) => callEngine(method, args));
+ipcMain.handle("engine", (_e, doc: number, method: string, args: unknown[]) => callEngine(method, args, doc));
 
 const IMAGE_EXT = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
 const fileData = async (p: string) => ({ path: p, name: basename(p), bytes: new Uint8Array(await readFile(p)) });
@@ -192,12 +197,15 @@ const SAVE_FILTERS: Record<string, Electron.FileFilter> = {
   pdf: { name: "PDF", extensions: ["pdf"] },
   png: { name: "Imagem PNG", extensions: ["png"] },
   jpg: { name: "Imagem JPEG", extensions: ["jpg"] },
+  docx: { name: "Documento do Word", extensions: ["docx"] },
+  txt: { name: "Texto", extensions: ["txt"] },
 };
+const SAVE_TITLES: Record<string, string> = { pdf: "Salvar PDF", png: "Salvar imagem", jpg: "Salvar imagem", docx: "Salvar como Word", txt: "Salvar como texto" };
 
 ipcMain.handle("save-dialog", async (_e, suggested: string, kind = "pdf") => {
   if (e2eScript && hooks.save.length) return hooks.save.shift()!;
   const r = await dialog.showSaveDialog(win!, {
-    title: kind === "pdf" ? "Salvar PDF" : "Salvar imagem",
+    title: SAVE_TITLES[kind] ?? "Salvar",
     defaultPath: suggested,
     filters: [SAVE_FILTERS[kind] ?? SAVE_FILTERS.pdf],
   });
@@ -214,10 +222,13 @@ ipcMain.handle("write-file", async (_e, path: string, bytes: Uint8Array) => { aw
 
 ipcMain.handle("join-path", (_e, ...parts: string[]) => join(...parts));
 
-ipcMain.on("state", (_e, s: { dirty: boolean; title: string }) => {
+ipcMain.on("state", (_e, s: { dirty: boolean; title: string; doc: number }) => {
   dirty = s.dirty;
+  activeDoc = s.doc;
   win?.setTitle(s.title);
 });
+
+ipcMain.handle("set-fullscreen", (_e, on: boolean) => { win?.setFullScreen(!!on); return win?.isFullScreen() ?? false; });
 
 // A interface chama isto logo depois de começar a escutar "open-path".
 ipcMain.handle("take-pending-path", () => { rendererReady = true; const p = pendingPath; pendingPath = null; return p; });
@@ -256,14 +267,14 @@ ipcMain.handle("recent-clear", () => {
 // --- impressão ---
 // As páginas viram imagens numa janela oculta e o Chromium abre o diálogo de impressão do Windows.
 const printDirs = new Set<string>(); // pastas temporárias de impressões em andamento
-ipcMain.handle("print", async (_e, pages?: number[]) => {
+ipcMain.handle("print", async (_e, doc: number, pages?: number[]) => {
   const dir = await mkdtemp(join(tmpdir(), "papiro-print-"));
   printDirs.add(dir);
   let pw: BrowserWindow | null = null;
   try {
-    const total = pages?.length ?? ((await callEngine("info", [])) as { pageCount: number }).pageCount;
+    const total = pages?.length ?? ((await callEngine("info", [], doc)) as { pageCount: number }).pageCount;
     const dpi = total > 80 ? 150 : 200;
-    const sheets = (await callEngine("printFiles", [dir, dpi, pages])) as { name: string; w: number; h: number }[];
+    const sheets = (await callEngine("printFiles", [dir, dpi, pages], doc)) as { name: string; w: number; h: number }[];
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>PapyrusPDF</title><style>
 html, body { height: 100%; margin: 0; padding: 0; background: #fff; }
 .p { height: 100%; width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; break-after: page; break-inside: avoid; }
@@ -310,6 +321,13 @@ function cleanPrintLeftovers(): void {
 }
 
 if (first) {
-  app.whenReady().then(() => { createWindow(); cleanPrintLeftovers(); });
+  app.whenReady().then(() => {
+    // Sem corretor ortográfico: sem ele o Electron baixaria um dicionário da internet quando o
+    // Windows não tem corretor para o idioma. Assim o programa não faz nenhuma conexão.
+    session.defaultSession.setSpellCheckerEnabled(false);
+    session.defaultSession.setSpellCheckerLanguages([]);
+    createWindow();
+    cleanPrintLeftovers();
+  });
   app.on("window-all-closed", () => { worker?.terminate(); app.quit(); });
 }

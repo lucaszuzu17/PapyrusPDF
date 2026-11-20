@@ -199,3 +199,42 @@ button.primary { background: var(--accent); color: var(--accent-ink); padding: 6
 .dropzone b { font-size: 18px; }
 .dropzone span { color: var(--muted); }
 .busy progress { width: 140px; }
+
+/* abas de documentos */
+.tabbar { display: flex; align-items: flex-end; gap: 2px; padding: 4px 8px 0; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; flex: none; min-height: 34px; }
+.doctab { display: flex; align-items: center; max-width: 240px; min-width: 110px; border: 1px solid transparent; border-bottom: none; border-radius: 8px 8px 0 0; color: var(--muted); }
+.doctab:hover { background: var(--accent-soft); }
+.doctab.on { background: var(--bg); border-color: var(--line); color: var(--text); margin-bottom: -1px; padding-bottom: 1px; }
+.dt-name { flex: 1; min-width: 0; text-align: left; padding: 6px 4px 6px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doctab.on .dt-name { font-weight: 600; }
+.dt-dot { color: var(--accent); margin-right: 4px; font-weight: 700; }
+.dt-close { padding: 3px; margin-right: 4px; border-radius: 4px; opacity: 0.55; }
+.dt-close:hover { opacity: 1; background: var(--line); }
+.dt-new { padding: 5px 8px; margin: 0 0 3px 4px; color: var(--muted); border-radius: 6px; }
+.dt-new:hover { background: var(--accent-soft); color: var(--text); }
+
+/* duas páginas lado a lado */
+.pages.double { gap: 16px; }
+.spread { display: flex; gap: 16px; align-items: flex-start; justify-content: center; }
+
+/* tela cheia */
+.app.fullscreen .viewer { background: #111; }
+.fs-exit { position: fixed; top: 12px; right: 16px; z-index: 30; display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; background: rgba(30, 30, 30, 0.75); color: #eee; opacity: 0.25; transition: opacity 0.2s; }
+.fs-exit:hover, .fs-exit:focus-visible { opacity: 1; }
+
+/* idioma do OCR e botões de alternar na barra de status */
+.ocrlang { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 4px 6px; color: var(--muted); }
+.ocrlang select { min-width: 170px; }
+.status button.on { color: var(--accent); background: var(--accent-soft); border-radius: 4px; }
+
+/* campos com botão e aviso (força da senha) */
+.fld-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.fld-head > label { font-size: 12px; color: var(--muted); }
+.fld-action { font-size: 12px; color: var(--accent); padding: 0 2px; text-decoration: underline; }
+.fld-note { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.meter { flex: none; width: 70px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.meter i { display: block; height: 100%; border-radius: 3px; background: #c0392b; }
+.fld-note[data-level="1"] .meter i { background: #d9822b; }
+.fld-note[data-level="2"] .meter i { background: #d4b106; }
+.fld-note[data-level="3"] .meter i { background: #5a9e3a; }
+.fld-note[data-level="4"] .meter i { background: #2e7d32; }

@@ -11,21 +11,24 @@ const on = <T,>(channel: string, cb: (v: T) => void) => {
 };
 
 const api = {
-  engine: <T = any>(method: string, ...args: unknown[]): Promise<T> => ipcRenderer.invoke("engine", method, args),
+  /** Chamada ao motor do documento `doc` (cada aba tem o seu). */
+  engine: <T = any>(doc: number, method: string, ...args: unknown[]): Promise<T> => ipcRenderer.invoke("engine", doc, method, args),
   openDialog: (opts?: { title?: string; images?: boolean; multi?: boolean }): Promise<FileData[]> =>
     ipcRenderer.invoke("open-dialog", opts ?? {}),
   readFile: (path: string): Promise<FileData> => ipcRenderer.invoke("read-file", path),
-  saveDialog: (suggested: string, kind: "pdf" | "png" | "jpg" = "pdf"): Promise<string | null> =>
+  saveDialog: (suggested: string, kind: "pdf" | "png" | "jpg" | "docx" | "txt" = "pdf"): Promise<string | null> =>
     ipcRenderer.invoke("save-dialog", suggested, kind),
   folderDialog: (): Promise<string | null> => ipcRenderer.invoke("folder-dialog"),
   writeFile: (path: string, bytes: Uint8Array): Promise<boolean> => ipcRenderer.invoke("write-file", path, bytes),
   joinPath: (...parts: string[]): Promise<string> => ipcRenderer.invoke("join-path", ...parts),
   showInFolder: (path: string): Promise<void> => ipcRenderer.invoke("show-in-folder", path),
-  setState: (s: { dirty: boolean; title: string }) => ipcRenderer.send("state", s),
+  setState: (s: { dirty: boolean; title: string; doc: number }) => ipcRenderer.send("state", s),
+  setFullScreen: (on: boolean): Promise<boolean> => ipcRenderer.invoke("set-fullscreen", on),
+  onFullScreen: (cb: (on: boolean) => void) => on("fullscreen", cb),
   takePendingPath: (): Promise<string | null> => ipcRenderer.invoke("take-pending-path"),
   /** Caminho no disco de um arquivo arrastado para a janela ("" se não vier do disco). */
   pathForFile: (file: File): string => { try { return webUtils.getPathForFile(file); } catch { return ""; } },
-  print: (pages?: number[]): Promise<{ ok: boolean; reason?: string; pages: number }> => ipcRenderer.invoke("print", pages),
+  print: (doc: number, pages?: number[]): Promise<{ ok: boolean; reason?: string; pages: number }> => ipcRenderer.invoke("print", doc, pages),
   recentList: (): Promise<Recent[]> => ipcRenderer.invoke("recent-list"),
   /** Registra o arquivo como recente e devolve a página em que ele estava da última vez. */
   recentAdd: (path: string): Promise<number> => ipcRenderer.invoke("recent-add", path),

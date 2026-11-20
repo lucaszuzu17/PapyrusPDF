@@ -104,6 +104,16 @@ export interface EditTextRequest {
   lineHeight?: number;
 }
 
+/** Resultado da edição de texto: quais fontes foram usadas no trecho novo. */
+export interface EditTextResult {
+  info: DocInfo;
+  fonts: {
+    original: string | null; // fonte embutida no próprio documento
+    system: string | null;   // fonte do Windows embutida porque faltavam letras na original
+    fallback: boolean;       // alguma letra saiu numa fonte padrão do PDF
+  };
+}
+
 export interface OcrProgress {
   page: number;
   done: number;

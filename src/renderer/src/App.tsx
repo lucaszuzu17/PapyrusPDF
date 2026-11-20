@@ -39,10 +39,12 @@ function Shell() {
   useShortcuts();
   const dropping = useFileDrop();
   const prog = app.ocrProgress ?? app.progress;
+  const fs = app.fullscreen;
   return (
-    <div className="app">
-      <Ribbon />
-      {app.doc && app.scanned.length > 0 && !app.ocrProgress && (
+    <div className={fs ? "app fullscreen" : "app"}>
+      {!fs && <Ribbon />}
+      {!fs && <TabBar />}
+      {!fs && app.doc && app.scanned.length > 0 && !app.ocrProgress && (
         <div className="banner">
           <Icon name="ocr" size={18} />
           {app.scanned.length === app.doc.info.pageCount
@@ -52,10 +54,15 @@ function Shell() {
         </div>
       )}
       <main className="work">
-        <Sidebar />
-        {app.view === "organize" ? <Organizer /> : <Viewer />}
+        {!fs && <Sidebar />}
+        {app.view === "organize" && !fs ? <Organizer /> : <Viewer />}
       </main>
-      <StatusBar />
+      {!fs && <StatusBar />}
+      {fs && (
+        <button className="fs-exit" title="Sair da tela cheia (Esc)" onClick={() => app.toggleFullScreen(false)}>
+          <Icon name="close" size={16} /> Sair da tela cheia
+        </button>
+      )}
       <Dialogs />
       {app.busy && (
         <div className="busy" role="status">
@@ -78,6 +85,34 @@ function Shell() {
   );
 }
 
+/** Barra de abas: um documento por aba, como num navegador. */
+function TabBar() {
+  const app = useApp();
+  if (!app.tabs.length) return null;
+  return (
+    <nav className="tabbar" role="tablist" aria-label="Documentos abertos">
+      {app.tabs.map((t) => {
+        const on = t.id === app.doc?.id;
+        return (
+          <div key={t.id} className={on ? "doctab on" : "doctab"} role="tab" aria-selected={on} title={t.path ?? t.name}
+            onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); app.closeTab(t.id); } }}>
+            <button className="dt-name" onClick={() => app.switchTab(t.id)}>
+              {t.dirty && <span className="dt-dot" aria-label="alterado">•</span>}
+              {t.name}
+            </button>
+            <button className="dt-close" title="Fechar (Ctrl+W)" aria-label={`Fechar ${t.name}`} onClick={() => app.closeTab(t.id)}>
+              <Icon name="close" size={13} />
+            </button>
+          </div>
+        );
+      })}
+      <button className="dt-new" title="Abrir outro PDF (Ctrl+O)" aria-label="Abrir outro PDF" onClick={() => app.openFile()}>
+        <Icon name="plus" size={16} />
+      </button>
+    </nav>
+  );
+}
+
 function StatusBar() {
   const app = useApp();
   const [pg, setPg] = useState("1");
@@ -93,6 +128,9 @@ function StatusBar() {
         <input className="pgnum" value={pg} onChange={(e) => setPg(e.target.value)} aria-label="Página" /> / {n}
       </form>
       <button title="Próxima página" disabled={app.page >= n - 1} onClick={() => app.goTo(app.page + 1)}><Icon name="chevR" size={16} /></button>
+      <button title="Uma página" className={app.layout === "single" ? "on" : ""} onClick={() => app.setLayout("single")}><Icon name="onePage" size={16} /></button>
+      <button title="Duas páginas" className={app.layout === "double" ? "on" : ""} onClick={() => app.setLayout("double")}><Icon name="twoPages" size={16} /></button>
+      <button title="Tela cheia (F11)" onClick={() => app.toggleFullScreen(true)}><Icon name="fullscreen" size={16} /></button>
       <button title="Reduzir" onClick={() => app.setZoom((z) => z / 1.2)}><Icon name="zoomOut" size={16} /></button>
       <span className="zoom">{Math.round(app.zoom * 100)}%</span>
       <button title="Ampliar" onClick={() => app.setZoom((z) => z * 1.2)}><Icon name="zoomIn" size={16} /></button>
@@ -141,8 +179,20 @@ function useShortcuts() {
       const k = e.key.toLowerCase();
       // com uma operação em andamento ou um diálogo aberto, os atalhos que mexem no documento esperam
       const free = !app.busy && !app.dialog;
+      if (e.key === "F11") { e.preventDefault(); if (app.doc || app.fullscreen) app.toggleFullScreen(); return; }
+      if (app.fullscreen && !typing && !app.dialog) {
+        // em tela cheia, as setas e o Page Up/Down trocam de página
+        if (e.key === "Escape") { app.toggleFullScreen(false); return; }
+        const n = app.doc?.info.pageCount ?? 0, step = app.layout === "double" ? 2 : 1;
+        if (["ArrowRight", "ArrowDown", "PageDown", " "].includes(e.key) && !e.ctrlKey) { e.preventDefault(); app.goTo(Math.min(n - 1, app.page - (app.layout === "double" ? app.page % 2 : 0) + step)); return; }
+        if (["ArrowLeft", "ArrowUp", "PageUp"].includes(e.key) && !e.ctrlKey) { e.preventDefault(); app.goTo(Math.max(0, app.page - (app.layout === "double" ? app.page % 2 : 0) - step)); return; }
+      }
       if (e.ctrlKey || e.metaKey) {
-        if (k === "o") { e.preventDefault(); if (free) app.openFile(); }
+        if (k === "tab") { e.preventDefault(); app.cycleTab(e.shiftKey ? -1 : 1); }
+        else if (k === "pagedown") { e.preventDefault(); app.cycleTab(1); }
+        else if (k === "pageup") { e.preventDefault(); app.cycleTab(-1); }
+        else if (k === "w") { e.preventDefault(); if (app.doc && free) app.closeTab(app.doc.id); }
+        else if (k === "o") { e.preventDefault(); if (free) app.openFile(); }
         else if (k === "s" && app.doc) { e.preventDefault(); if (free) app.save(e.shiftKey); }
         else if (k === "f" && app.doc) { e.preventDefault(); if (!app.dialog) app.setPanel("search"); }
         else if (k === "p") { e.preventDefault(); if (app.doc && free) app.printDoc(); }

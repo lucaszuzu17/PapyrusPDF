@@ -1,9 +1,10 @@
 // Uma página: imagem renderizada pelo motor + camada de interação por cima.
 import { useEffect, useMemo, useRef, useState, type PointerEvent as RPE } from "react";
-import { engine, type AnnotInfo, type FieldInfo, type PageInfo, type Point, type Quad, type Rect, type TextBlock, type TextLine } from "./api.ts";
+import { engine, type AnnotInfo, type EditTextResult, type FieldInfo, type PageInfo, type Point, type Quad, type Rect, type TextBlock, type TextLine } from "./api.ts";
 import { useApp, type RGB, type Tool } from "./state.tsx";
 import { Icon } from "./icons.tsx";
 import { dataUrlBytes } from "./images.ts";
+import { cssFontFamily, fontStyle } from "../../engine/fontname.ts";
 
 const TEXT_TOOLS: Tool[] = ["select", "highlight", "underline", "strikeout", "edittext"];
 const DRAG_TOOLS: Tool[] = ["freetext", "rect", "ellipse", "line", "arrow", "redact"];
@@ -217,10 +218,23 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     if (text === blockText(block)) return;
     const l0 = block.lines[0];
     const lh = block.lines.length > 1 ? block.lines[1].origin[1] - l0.origin[1] : l0.size * 1.2;
-    await app.mutate("Editando texto…", () => engine.editText({
-      page: index, area: block.bbox, text, origin: l0.origin, size: l0.size, color: l0.color, font: l0.font,
-      maxWidth: block.bbox[2] - block.bbox[0] + 2, lineHeight: lh > 0 ? lh : l0.size * 1.2,
-    }));
+    const out: { fonts: EditTextResult["fonts"] | null } = { fonts: null };
+    const ok = await app.mutate("Editando texto…", async () => {
+      const r = await engine.editText({
+        page: index, area: block.bbox, text, origin: l0.origin, size: l0.size, color: l0.color, font: l0.font,
+        maxWidth: block.bbox[2] - block.bbox[0] + 2, lineHeight: lh > 0 ? lh : l0.size * 1.2,
+      });
+      out.fonts = r.fonts;
+      return r;
+    });
+    // só avisa quando o texto novo não saiu todo na fonte do próprio documento
+    const f = out.fonts;
+    if (ok && f && (f.system || f.fallback)) {
+      const name = fontStyle(l0.font).family;
+      if (f.system && !f.fallback) app.notify(`Algumas letras não estavam na fonte embutida no PDF; vieram da ${f.system} instalada no Windows, que foi incorporada ao arquivo (ele fica maior).`);
+      else if (f.original || f.system) app.notify(`Algumas letras não existem na fonte ${name} nem no Windows e saíram numa fonte padrão do PDF.`);
+      else app.notify(`A fonte ${name} não pôde ser reaproveitada neste PDF; o texto saiu numa fonte padrão parecida.`);
+    }
   };
 
   const commitFreeText = async () => {
@@ -313,7 +327,8 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
           const r = editing.block.bbox;
           return (
             <textarea className="editor" autoFocus value={editing.text}
-              style={{ ...box([r[0] - 2, r[1] - 2, Math.max(r[2], r[0] + 120) + 2, r[3] + l0.size * 2]), fontSize: l0.size * zoom, lineHeight: `${lh * zoom}px`, fontFamily: cssFont(l0.font), color: rgbCss(l0.color) }}
+              style={{ ...box([r[0] - 2, r[1] - 2, Math.max(r[2], r[0] + 120) + 2, r[3] + l0.size * 2]), fontSize: l0.size * zoom, lineHeight: `${lh * zoom}px`,
+                fontFamily: cssFontFamily(l0.font), fontWeight: fontStyle(l0.font).bold ? 700 : 400, fontStyle: fontStyle(l0.font).italic ? "italic" : "normal", color: rgbCss(l0.color) }}
               onPointerDown={(e) => e.stopPropagation()}
               onChange={(e) => setEditing({ ...editing, text: e.target.value })}
               onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); if (e.key === "Enter" && e.ctrlKey) commitEdit(); }}
@@ -370,7 +385,6 @@ const norm = (a: Point, b: Point): Rect => [Math.min(a[0], b[0]), Math.min(a[1],
 const inside = (p: Point, r: Rect) => p[0] >= r[0] - 2 && p[0] <= r[2] + 2 && p[1] >= r[1] - 2 && p[1] <= r[3] + 2;
 const area = (r: Rect) => (r[2] - r[0]) * (r[3] - r[1]);
 const rgbCss = (c: number[]) => `rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
-const cssFont = (f: string) => (/times|roman|serif|georgia|garamond/i.test(f) && !/sans/i.test(f) ? "'Times New Roman', serif" : /courier|mono/i.test(f) ? "'Courier New', monospace" : "Arial, Helvetica, sans-serif");
 
 /** Texto do bloco: linhas curtas viram quebra de linha; linhas cheias continuam o parágrafo. */
 function blockText(b: TextBlock): string {
