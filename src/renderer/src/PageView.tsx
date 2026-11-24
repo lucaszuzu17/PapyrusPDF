@@ -4,7 +4,7 @@ import { engine, type AnnotInfo, type EditTextResult, type FieldInfo, type PageI
 import { useApp, type RGB, type Tool } from "./state.tsx";
 import { Icon } from "./icons.tsx";
 import { dataUrlBytes } from "./images.ts";
-import { cssFontFamily, fontStyle } from "../../engine/fontname.ts";
+import { cssFontFamily, fontStyle, isSymbolicFont, normalizePdfText } from "../../engine/fontname.ts";
 
 const TEXT_TOOLS: Tool[] = ["select", "highlight", "underline", "strikeout", "edittext"];
 const DRAG_TOOLS: Tool[] = ["freetext", "rect", "ellipse", "line", "arrow", "redact"];
@@ -217,23 +217,31 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     setEditing(null);
     if (text === blockText(block)) return;
     const l0 = block.lines[0];
-    const lh = block.lines.length > 1 ? block.lines[1].origin[1] - l0.origin[1] : l0.size * 1.2;
+    const st = blockStyle(block);
+    const lh = block.lines.length > 1 ? block.lines[1].origin[1] - l0.origin[1] : st.size * 1.2;
     const out: { fonts: EditTextResult["fonts"] | null } = { fonts: null };
     const ok = await app.mutate("Editando texto…", async () => {
       const r = await engine.editText({
-        page: index, area: block.bbox, text, origin: l0.origin, size: l0.size, color: l0.color, font: l0.font,
-        maxWidth: block.bbox[2] - block.bbox[0] + 2, lineHeight: lh > 0 ? lh : l0.size * 1.2,
+        page: index, area: block.bbox, areas: block.lines.map((l) => l.bbox), text,
+        origin: l0.origin, size: st.size, color: st.color, font: st.font,
+        maxWidth: block.bbox[2] - block.bbox[0] + 2, lineHeight: lh > 0 ? lh : st.size * 1.2,
       });
       out.fonts = r.fonts;
       return r;
     });
-    // só avisa quando o texto novo não saiu todo na fonte do próprio documento
+    // avisa quando houve substituição por "?" ou quando o texto não saiu todo na fonte do próprio documento
     const f = out.fonts;
-    if (ok && f && (f.system || f.fallback)) {
-      const name = fontStyle(l0.font).family;
-      if (f.system && !f.fallback) app.notify(`Algumas letras não estavam na fonte embutida no PDF; vieram da ${f.system} instalada no Windows, que foi incorporada ao arquivo (ele fica maior).`);
-      else if (f.original || f.system) app.notify(`Algumas letras não existem na fonte ${name} nem no Windows e saíram numa fonte padrão do PDF.`);
-      else app.notify(`A fonte ${name} não pôde ser reaproveitada neste PDF; o texto saiu numa fonte padrão parecida.`);
+    if (ok && f) {
+      const name = fontStyle(st.font).family;
+      if ((f.substituted ?? 0) > 0) {
+        app.notify(`Atenção: ${f.substituted} caractere(s) não têm suporte em nenhuma fonte disponível e foram substituídos por “?”.`);
+      } else if (f.system && !f.fallback) {
+        app.notify(`Algumas letras não estavam na fonte embutida no PDF; vieram da ${f.system} instalada no Windows, que foi incorporada ao arquivo.`);
+      } else if (f.fallback && (f.original || f.system)) {
+        app.notify(`Algumas letras não existem na fonte ${name} nem no Windows e saíram numa fonte padrão do PDF.`);
+      } else if (f.fallback) {
+        app.notify(`A fonte ${name} não pôde ser reaproveitada neste PDF; o texto saiu numa fonte padrão parecida.`);
+      }
     }
   };
 
@@ -323,16 +331,30 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
         ) : null}
         {editing && (() => {
           const l0 = editing.block.lines[0];
-          const lh = editing.block.lines.length > 1 ? editing.block.lines[1].origin[1] - l0.origin[1] : l0.size * 1.2;
+          const st = blockStyle(editing.block);
+          const lh = editing.block.lines.length > 1 ? editing.block.lines[1].origin[1] - l0.origin[1] : st.size * 1.2;
           const r = editing.block.bbox;
+          const boxW = Math.max(r[2] - r[0], 120);
+          const charsPerLine = Math.max(8, Math.floor(boxW / Math.max(4, st.size * 0.52)));
+          const estLines = editing.text.split("\n").reduce((sum, p) => sum + Math.max(1, Math.ceil(p.length / charsPerLine)), 0);
+          const overflows = estLines * lh > (r[3] - r[1]) + lh * 0.6;
+          const edRect: Rect = [r[0] - 2, r[1] - 2, Math.max(r[2], r[0] + 120) + 2, r[3] + st.size * 2];
+          const [wx, wy] = toPx(edRect[0], edRect[3] + 2);
           return (
-            <textarea className="editor" autoFocus value={editing.text}
-              style={{ ...box([r[0] - 2, r[1] - 2, Math.max(r[2], r[0] + 120) + 2, r[3] + l0.size * 2]), fontSize: l0.size * zoom, lineHeight: `${lh * zoom}px`,
-                fontFamily: cssFontFamily(l0.font), fontWeight: fontStyle(l0.font).bold ? 700 : 400, fontStyle: fontStyle(l0.font).italic ? "italic" : "normal", color: rgbCss(l0.color) }}
-              onPointerDown={(e) => e.stopPropagation()}
-              onChange={(e) => setEditing({ ...editing, text: e.target.value })}
-              onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); if (e.key === "Enter" && e.ctrlKey) commitEdit(); }}
-              onBlur={commitEdit} />
+            <>
+              <textarea className={overflows ? "editor overflow" : "editor"} autoFocus value={editing.text}
+                style={{ ...box(edRect), fontSize: st.size * zoom, lineHeight: `${lh * zoom}px`,
+                  fontFamily: cssFontFamily(st.font), fontWeight: fontStyle(st.font).bold ? 700 : 400, fontStyle: fontStyle(st.font).italic ? "italic" : "normal", color: rgbCss(st.color) }}
+                onPointerDown={(e) => e.stopPropagation()}
+                onChange={(e) => setEditing({ ...editing, text: e.target.value })}
+                onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); if (e.key === "Enter" && e.ctrlKey) commitEdit(); }}
+                onBlur={commitEdit} />
+              {overflows && (
+                <div className="editor-warn" style={{ left: wx, top: wy }}>
+                  Texto ultrapassa a área original e pode sobrepor conteúdo abaixo
+                </div>
+              )}
+            </>
           );
         })()}
         {freeText && (
@@ -386,13 +408,32 @@ const inside = (p: Point, r: Rect) => p[0] >= r[0] - 2 && p[0] <= r[2] + 2 && p[
 const area = (r: Rect) => (r[2] - r[0]) * (r[3] - r[1]);
 const rgbCss = (c: number[]) => `rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
 
+/** Estilo predominante do bloco (evita herdar fonte simbólica ou de destaque de uma única linha). */
+function blockStyle(b: TextBlock): { font: string; size: number; color: RGB } {
+  const counts = new Map<string, { font: string; size: number; color: RGB; weight: number; sym: boolean }>();
+  for (const l of b.lines) {
+    const w = Math.max(1, l.text.trim().length);
+    const sym = isSymbolicFont(l.font);
+    const k = `${l.font}|${Math.round(l.size * 10)}|${l.color.map((v) => Math.round(v * 100)).join(",")}`;
+    const prev = counts.get(k);
+    if (prev) prev.weight += w;
+    else counts.set(k, { font: l.font, size: l.size, color: l.color, weight: w, sym });
+  }
+  const all = [...counts.values()];
+  const nonSym = all.filter((x) => !x.sym);
+  const pool = nonSym.length ? nonSym : all;
+  pool.sort((a, b) => b.weight - a.weight);
+  const best = pool[0] ?? b.lines[0];
+  return { font: best.font, size: best.size, color: best.color };
+}
+
 /** Texto do bloco: linhas curtas viram quebra de linha; linhas cheias continuam o parágrafo. */
 function blockText(b: TextBlock): string {
   const right = b.bbox[2];
-  return b.lines.map((l, i) => {
+  return normalizePdfText(b.lines.map((l, i) => {
     const t = l.text.replace(/\s+$/, "");
     if (i === b.lines.length - 1) return t;
     const short = right - l.bbox[2] > l.size * 3;
     return t + (short ? "\n" : " ");
-  }).join("");
+  }).join(""));
 }

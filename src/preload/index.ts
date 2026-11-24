@@ -20,6 +20,7 @@ const api = {
     ipcRenderer.invoke("save-dialog", suggested, kind),
   folderDialog: (): Promise<string | null> => ipcRenderer.invoke("folder-dialog"),
   writeFile: (path: string, bytes: Uint8Array): Promise<boolean> => ipcRenderer.invoke("write-file", path, bytes),
+  checkWritable: (path: string): Promise<boolean> => ipcRenderer.invoke("check-writable", path),
   joinPath: (...parts: string[]): Promise<string> => ipcRenderer.invoke("join-path", ...parts),
   showInFolder: (path: string): Promise<void> => ipcRenderer.invoke("show-in-folder", path),
   setState: (s: { dirty: boolean; title: string; doc: number }) => ipcRenderer.send("state", s),

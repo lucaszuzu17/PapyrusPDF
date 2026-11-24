@@ -2,8 +2,8 @@
 // Não depende de Electron nem de interface — pode ser testado direto no Node.
 import * as mupdf from "mupdf";
 import { buildDocx, type DocxImage, type DocxPage, type DocxPara, type DocxRun } from "./docx.ts";
-import { fontStyle, stripSubset } from "./fontname.ts";
-import { originalSource, type GlyphSource } from "./fonts.ts";
+import { fontStyle, genericFontCategory, isSymbolicFont, stripSubset } from "./fontname.ts";
+import { normalizePdfText, originalSource, type GlyphSource } from "./fonts.ts";
 import { removePageWatermarks } from "./watermarks.ts";
 import type {
   AnnotInfo, DocInfo, EditTextRequest, EditTextResult, FieldInfo, NewAnnot, OutlineNode,
@@ -389,30 +389,61 @@ export class PdfEngine {
     return png;
   }
 
-  /** Texto da página em blocos → linhas → caracteres, com fonte, tamanho e cor. */
+  /** Texto da página em blocos → linhas → caracteres, com fonte, tamanho e cor predominantes. */
   pageText(index: number): TextBlock[] {
     const page = this.d().loadPage(index);
     const st = page.toStructuredText("preserve-whitespace");
     const blocks: TextBlock[] = [];
     let block: TextBlock | null = null;
     let line: TextLine | null = null;
+    type StyleCount = { font: string; size: number; color: RGB; count: number; symbolic: boolean };
+    let styles: Map<string, StyleCount> | null = null;
     st.walk({
       beginTextBlock(bbox) { block = { bbox: bbox as Rect, lines: [] }; },
       beginLine(bbox) {
         line = { bbox: bbox as Rect, text: "", font: "", size: 0, color: [0, 0, 0], origin: [0, 0], chars: [] };
+        styles = new Map();
       },
       onChar(c, origin, font, size, quad, color) {
-        if (!line) return;
+        if (!line || !styles) return;
+        const fname = font.getName();
+        const rgb = toRGB(color as number[]);
         if (line.chars.length === 0) {
-          line.font = font.getName();
+          line.font = fname;
           line.size = size;
           line.origin = [origin[0], origin[1]];
-          line.color = toRGB(color as number[]);
+          line.color = rgb;
+        }
+        // Conta o estilo predominante da linha (ignora espaços e caracteres de área privada como bullets do Word)
+        const cp = c.codePointAt(0) ?? 0;
+        const isPua = cp >= 0xe000 && cp <= 0xf8ff;
+        if (c.trim() && !isPua) {
+          const sym = isSymbolicFont(fname);
+          const k = `${fname}|${Math.round(size * 10)}|${rgb.map((v) => Math.round(v * 100)).join(",")}`;
+          const prev = styles.get(k);
+          if (prev) prev.count++;
+          else styles.set(k, { font: fname, size, color: rgb, count: 1, symbolic: sym });
         }
         line.text += c;
         line.chars.push({ c, quad: quad as Quad });
       },
-      endLine() { if (block && line && line.chars.length) block.lines.push(line); line = null; },
+      endLine() {
+        if (block && line && line.chars.length) {
+          // Prefere a fonte não-simbólica mais frequente na linha (ex.: ignora um bullet em Symbol no início)
+          const list = styles ? [...styles.values()] : [];
+          const nonSym = list.filter((s) => !s.symbolic);
+          const pool = nonSym.length ? nonSym : list;
+          if (pool.length) {
+            pool.sort((a, b) => b.count - a.count);
+            line.font = pool[0].font;
+            line.size = pool[0].size;
+            line.color = pool[0].color;
+          }
+          block.lines.push(line);
+        }
+        line = null;
+        styles = null;
+      },
       endTextBlock() { if (block && block.lines.length) blocks.push(block); block = null; },
     });
     st.destroy(); page.destroy();
@@ -685,42 +716,58 @@ export class PdfEngine {
   /**
    * Substitui o texto de uma área: remove só os glifos de texto da área (imagens e vetores ficam)
    * e escreve o texto novo. Cada letra sai, nesta ordem de preferência:
-   * 1. na própria fonte embutida no PDF, quando ela tem a letra (o trecho continua igual ao resto);
+   * 1. na própria fonte embutida no PDF, quando ela tem o glifo confirmado (o trecho continua igual ao resto);
    * 2. na mesma fonte instalada no Windows, embutida no PDF (só quando faltou alguma letra);
-   * 3. numa das 14 fontes padrão do PDF, parecida com a original.
+   * 3. numa das 14 fontes padrão do PDF (WinAnsi), parecida com a original;
+   * 4. numa fonte Unicode genérica do Windows (Segoe UI / Segoe UI Symbol / Cambria Math) para símbolos fora de WinAnsi.
    */
   editText(req: EditTextRequest): EditTextResult {
-    const used = { original: null as string | null, system: null as string | null, fallback: false };
+    const used = { original: null as string | null, system: null as string | null, fallback: false, substituted: 0 };
     this.op("Editar texto", () => {
       const page = this.d().loadPage(req.page);
-      const want = req.text.replace(/\n/g, "");
+      const text = normalizePdfText(req.text);
+      const want = text.replace(/\n/g, "");
+      const hasLatin = /[A-Za-zÀ-ÿ0-9]/.test(want);
+      const symbolic = isSymbolicFont(req.font) && hasLatin;
+      const effFont = symbolic ? "Helvetica" : req.font;
+
       // A fonte original é escolhida antes da redação, que pode tirar dos recursos da página
       // uma fonte que só esse trecho usava (o objeto continua no documento).
       const seen = this.charsByFont(page).get(req.font) ?? new Set<string>();
-      const orig = originalSource(page.getObject(), req.font, want, seen);
-      const red = page.createAnnotation("Redact");
-      red.setRect(pad(req.area, 0.5));
-      red.update();
-      red.applyRedaction(0, mupdf.PDFPage.REDACT_IMAGE_NONE, mupdf.PDFPage.REDACT_LINE_ART_NONE,
-        mupdf.PDFPage.REDACT_TEXT_REMOVE);
+      const orig = symbolic ? null : originalSource(page.getObject(), req.font, want, seen);
+
+      // Se foram informados os retângulos linha a linha, redige cada linha separadamente para
+      // não apagar texto de colunas ou células vizinhas.
+      const targets = req.areas?.length ? req.areas.map((a) => pad(a, 0.2)) : [pad(req.area, 0.35)];
+      for (const r of targets) {
+        const red = page.createAnnotation("Redact");
+        red.setRect(r);
+        red.update();
+        red.applyRedaction(0, mupdf.PDFPage.REDACT_IMAGE_NONE, mupdf.PDFPage.REDACT_LINE_ART_NONE,
+          mupdf.PDFPage.REDACT_TEXT_REMOVE);
+      }
       page.destroy();
 
-      const b14 = this.base14Source(base14For(req.font));
+      const b14 = this.base14Source(base14For(effFont));
       const sources: GlyphSource[] = orig ? [orig] : [];
       const missing = [...new Set(want)].filter((ch) => !orig?.glyph(ch));
       // Arial, Times e Courier têm equivalentes entre as fontes padrão: não vale embutir a do Windows por elas
-      const standard = ["Arial", "Times New Roman", "Courier New"].includes(fontStyle(req.font).family);
+      const standard = ["Arial", "Times New Roman", "Courier New"].includes(fontStyle(effFont).family);
       if (missing.length && !(standard && missing.every((ch) => b14.glyph(ch)))) {
-        const sys = this.systemSource(req.font);
+        const sys = this.systemSource(effFont);
         if (sys && missing.some((ch) => sys.glyph(ch))) sources.push(sys);
       }
       sources.push(b14);
+      // Para caracteres ainda ausentes (símbolos Unicode fora de WinAnsi como ✓, →, ≤, ▪, Ω),
+      // recorre a fontes Unicode amplas do Windows em vez de substituir por "?".
+      this.appendUnicodeFallbacks(sources, want, effFont);
+
       const pick = (ch: string) => {
-        for (const s of sources) { const g = s.glyph(ch); if (g) return { s, g }; }
-        return { s: b14, g: b14.glyph("?")! };
+        for (const s of sources) { const g = s.glyph(ch); if (g) return { s, g, sub: false }; }
+        return { s: b14, g: b14.glyph("?")!, sub: true };
       };
       const measure = (t: string) => ([...t].reduce((w, ch) => w + pick(ch).g.w, 0) / 1000) * req.size;
-      const lines = wrapMeasured(req.text, measure, req.maxWidth);
+      const lines = wrapMeasured(text, measure, req.maxWidth);
       const lh = req.lineHeight ?? req.size * 1.2;
       const fonts: Record<string, mupdf.PDFObject> = {};
       let ops = `BT\n${rg(req.color)}\n`;
@@ -729,13 +776,14 @@ export class PdfEngine {
         let cur: GlyphSource | null = null, hex = "";
         const flush = () => { if (cur && hex) ops += `/${cur.key} ${n3(req.size)} Tf <${hex}> Tj\n`; hex = ""; };
         for (const ch of ln) {
-          const { s, g } = pick(ch);
+          const { s, g, sub } = pick(ch);
           if (s !== cur) { flush(); cur = s; }
           hex += g.code.toString(16).padStart(s.twoByte ? 4 : 2, "0");
           fonts[s.key] = s.ref;
           if (!ch.trim()) continue;
-          if (s.kind === "original") used.original = s.label;
-          else if (s.kind === "system") used.system = s.label;
+          if (sub) { used.substituted++; used.fallback = true; }
+          else if (s.kind === "original") used.original = s.label;
+          else if (s.kind === "system") used.system ??= s.label;
           else used.fallback = true;
         }
         flush();
@@ -744,6 +792,60 @@ export class PdfEngine {
       this.appendContent(req.page, ops, fonts);
     });
     return { info: this.info(), fonts: used };
+  }
+
+  /** Acrescenta fontes Unicode genéricas do sistema só para os caracteres que nenhuma fonte anterior cobriu. */
+  private appendUnicodeFallbacks(sources: GlyphSource[], text: string, refFont: string): void {
+    if (!this.fontProvider) return;
+    let remaining = [...new Set(text)].filter((ch) => ch.trim() && !sources.some((s) => s.glyph(ch)));
+    if (!remaining.length) return;
+    const cat = genericFontCategory(refFont);
+    const { bold, italic } = fontStyle(refFont);
+    const suf = bold && italic ? " Bold Italic" : bold ? " Bold" : italic ? " Italic" : "";
+    const candidates = cat === "serif"
+      ? [`Cambria${suf}`, `Times New Roman${suf}`, "Segoe UI Symbol", "Cambria Math", "Segoe UI", "Arial"]
+      : cat === "mono"
+        ? [`Consolas${suf}`, `Courier New${suf}`, "Segoe UI Symbol", "Cambria Math", "Segoe UI", "Arial"]
+        : [`Segoe UI${suf}`, `Arial${suf}`, "Segoe UI Symbol", "Cambria Math", "Times New Roman"];
+    for (const cand of candidates) {
+      if (!remaining.length) break;
+      const sys = this.systemSource(cand);
+      if (!sys || sources.some((s) => s.key === sys.key)) continue;
+      if (!remaining.some((ch) => sys.glyph(ch))) continue;
+      sources.push(sys);
+      remaining = remaining.filter((ch) => !sys.glyph(ch));
+    }
+  }
+
+  /**
+   * Codifica uma linha de texto com a fonte Base-14 indicada, recorrendo a fontes Unicode do sistema
+   * só se houver caracteres fora da WinAnsi (evita "?" em cabeçalhos, rodapés, marcas d'água e OCR).
+   */
+  private encodeLineOps(
+    text: string,
+    base: string,
+    size: number,
+    fonts: Record<string, mupdf.PDFObject>,
+  ): { ops: string; width: number } {
+    const clean = normalizePdfText(text).replace(/\n/g, " ");
+    const b14 = this.base14Source(base);
+    const sources: GlyphSource[] = [b14];
+    this.appendUnicodeFallbacks(sources, clean, base);
+    const pick = (ch: string) => {
+      for (const s of sources) { const g = s.glyph(ch); if (g) return { s, g }; }
+      return { s: b14, g: b14.glyph("?")! };
+    };
+    let ops = "", cur: GlyphSource | null = null, hex = "", wUnits = 0;
+    const flush = () => { if (cur && hex) ops += `/${cur.key} ${n3(size)} Tf <${hex}> Tj `; hex = ""; };
+    for (const ch of clean) {
+      const { s, g } = pick(ch);
+      if (s !== cur) { flush(); cur = s; }
+      hex += g.code.toString(16).padStart(s.twoByte ? 4 : 2, "0");
+      wUnits += g.w;
+      fonts[s.key] = s.ref;
+    }
+    flush();
+    return { ops: ops.trimEnd(), width: (wUnits / 1000) * size };
   }
 
   /** Caracteres que a página desenha com cada fonte (pelo nome da fonte). */
@@ -931,7 +1033,6 @@ export class PdfEngine {
     const size = spec.size ?? 10;
     const margin = spec.margin ?? 28;
     const color = spec.color ?? [0.2, 0.2, 0.2];
-    const font = new mupdf.Font("Helvetica");
     const today = new Date().toLocaleDateString("pt-BR");
     const start = spec.startAt ?? 1;
     this.op("Cabeçalho e rodapé", () => {
@@ -939,6 +1040,7 @@ export class PdfEngine {
         const page = this.d().loadPage(index);
         const [x0, y0, x1, y1] = page.getBounds();
         page.destroy();
+        const fonts: Record<string, mupdf.PDFObject> = {};
         let ops = `BT\n${rg(color)}\n`;
         for (const it of items) {
           const text = it.text
@@ -947,16 +1049,15 @@ export class PdfEngine {
             .replaceAll("{total}", String(total))
             .replaceAll("{data}", today)
             .replaceAll("{arquivo}", this.title);
-          const w = textWidth(text, font, size);
-          const x = it.pos[1] === "l" ? x0 + margin : it.pos[1] === "r" ? x1 - margin - w : (x0 + x1 - w) / 2;
+          const enc = this.encodeLineOps(text, "Helvetica", size, fonts);
+          const x = it.pos[1] === "l" ? x0 + margin : it.pos[1] === "r" ? x1 - margin - enc.width : (x0 + x1 - enc.width) / 2;
           const y = it.pos[0] === "t" ? y0 + margin + size * 0.75 : y1 - margin;
-          ops += `/${this.fontKey("Helvetica")} ${n3(size)} Tf 1 0 0 -1 ${n3(x)} ${n3(y)} Tm <${winAnsiHex(text)}> Tj\n`;
+          ops += `1 0 0 -1 ${n3(x)} ${n3(y)} Tm ${enc.ops}\n`;
         }
         ops += "ET";
-        this.appendContent(index, ops, this.b14("Helvetica"));
+        this.appendContent(index, ops, fonts);
       });
     });
-    font.destroy();
     return this.info();
   }
 
@@ -966,7 +1067,6 @@ export class PdfEngine {
     const total = this.d().countPages();
     const pages = spec.pages?.length ? spec.pages : Array.from({ length: total }, (_, i) => i);
     const base = "Helvetica-Bold";
-    const font = new mupdf.Font(base);
     const opacity = Math.min(1, Math.max(0.05, spec.opacity ?? 0.18));
     // A marca comum é marcada como marca d'água (o comando "Remover marca d'água" a encontra, como
     // as do Acrobat e do Foxit). A marca de destinatário não leva essa etiqueta nem o nome PapiroGS.
@@ -979,21 +1079,24 @@ export class PdfEngine {
         const page = this.d().loadPage(index);
         const [x0, y0, x1, y1] = page.getBounds();
         page.destroy();
+        const probeFonts: Record<string, mupdf.PDFObject> = {};
+        const unit = this.encodeLineOps(spec.text, base, 1, probeFonts);
         // tamanho automático: a caixa do texto, já girada, cabe em 85% da página
-        const k = Math.max(0.5, textWidth(spec.text, font, 1)), ac = Math.abs(c), as = Math.abs(s);
+        const k = Math.max(0.5, unit.width), ac = Math.abs(c), as = Math.abs(s);
         const size = spec.size ?? Math.max(8, Math.min(140,
           (0.85 * (x1 - x0)) / (k * ac + 0.7 * as), (0.85 * (y1 - y0)) / (k * as + 0.7 * ac)));
-        const w = textWidth(spec.text, font, size), h = size * 0.7;
+        const fonts: Record<string, mupdf.PDFObject> = {};
+        const enc = this.encodeLineOps(spec.text, base, size, fonts);
+        const w = enc.width, h = size * 0.7;
         const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
         const x = cx - (w / 2) * c + (h / 2) * s;
         const y = cy + (w / 2) * s + (h / 2) * c;
-        let ops = `/${gs} gs BT ${rg(spec.color ?? [0.6, 0.6, 0.6])} /${this.fontKey(base)} ${n3(size)} Tf ` +
-          `${n3(c)} ${n3(-s)} ${n3(-s)} ${n3(-c)} ${n3(x)} ${n3(y)} Tm <${winAnsiHex(spec.text)}> Tj ET`;
+        let ops = `/${gs} gs BT ${rg(spec.color ?? [0.6, 0.6, 0.6])} ` +
+          `${n3(c)} ${n3(-s)} ${n3(-s)} ${n3(-c)} ${n3(x)} ${n3(y)} Tm ${enc.ops} ET`;
         if (removable) ops = `/Artifact <</Type /Pagination /Subtype /Watermark>> BDC q ${ops} Q EMC`;
-        this.appendContent(index, ops, this.b14(base), { [gs]: opacity }, spec.behind ?? false);
+        this.appendContent(index, ops, fonts, { [gs]: opacity }, spec.behind ?? false);
       }
     });
-    font.destroy();
     return this.info();
   }
 
@@ -1063,21 +1166,21 @@ export class PdfEngine {
     if (this.doc !== doc) throw new Error("O documento foi trocado durante o reconhecimento de texto.");
     if (!words.length) return { words: 0, info: this.info() };
 
-    const font = new mupdf.Font("Helvetica");
-    let ops = "BT\n3 Tr\n";
-    for (const w of words) {
-      const x0 = w.bbox[0] / scale + bx0, y0 = w.bbox[1] / scale + by0;
-      const x1 = w.bbox[2] / scale + bx0, y1 = w.bbox[3] / scale + by0;
-      const h = y1 - y0;
-      const size = Math.max(4, h * 0.95);
-      const natural = textWidth(w.text, font, size);
-      const tz = natural > 0 ? (100 * (x1 - x0)) / natural : 100;
-      ops += `/${this.fontKey("Helvetica")} ${n3(size)} Tf ${n3(tz)} Tz\n`;
-      ops += `1 0 0 -1 ${n3(x0)} ${n3(y1 - h * 0.2)} Tm <${winAnsiHex(w.text)}> Tj\n`;
-    }
-    ops += "ET";
-    font.destroy();
-    this.op("OCR", () => this.appendContent(index, ops, this.b14("Helvetica")));
+    this.op("OCR", () => {
+      const fonts: Record<string, mupdf.PDFObject> = {};
+      let ops = "BT\n3 Tr\n";
+      for (const w of words) {
+        const x0 = w.bbox[0] / scale + bx0, y0 = w.bbox[1] / scale + by0;
+        const x1 = w.bbox[2] / scale + bx0, y1 = w.bbox[3] / scale + by0;
+        const h = y1 - y0;
+        const size = Math.max(4, h * 0.95);
+        const enc = this.encodeLineOps(w.text, "Helvetica", size, fonts);
+        const tz = enc.width > 0 ? (100 * (x1 - x0)) / enc.width : 100;
+        ops += `${n3(tz)} Tz\n1 0 0 -1 ${n3(x0)} ${n3(y1 - h * 0.2)} Tm ${enc.ops}\n`;
+      }
+      ops += "ET";
+      this.appendContent(index, ops, fonts);
+    });
     return { words: words.length, info: this.info() };
   }
 

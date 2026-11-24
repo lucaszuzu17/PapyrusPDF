@@ -95,6 +95,7 @@ export interface SearchHit {
 export interface EditTextRequest {
   page: number;
   area: Rect;        // região do texto original (removido)
+  areas?: Rect[];    // retângulos por linha (evita apagar texto vizinho em tabelas/colunas)
   text: string;      // texto novo; "\n" quebra linha
   origin: Point;     // linha de base da primeira linha
   size: number;
@@ -111,6 +112,7 @@ export interface EditTextResult {
     original: string | null; // fonte embutida no próprio documento
     system: string | null;   // fonte do Windows embutida porque faltavam letras na original
     fallback: boolean;       // alguma letra saiu numa fonte padrão do PDF
+    substituted?: number;    // caracteres que não existiam em nenhuma fonte e viraram "?"
   };
 }
 

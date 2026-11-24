@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
 import { cpSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -218,7 +218,30 @@ ipcMain.handle("folder-dialog", async () => {
   return r.canceled ? null : r.filePaths[0];
 });
 
-ipcMain.handle("write-file", async (_e, path: string, bytes: Uint8Array) => { await writeFile(path, bytes); return true; });
+ipcMain.handle("check-writable", async (_e, path: string) => {
+  if (existsSync(path)) {
+    const fh = await open(path, "r+");
+    await fh.close();
+    return true;
+  }
+  const probe = `${path}.papiro-${process.pid}-${Date.now()}.probe`;
+  await writeFile(probe, new Uint8Array());
+  await rm(probe, { force: true }).catch(() => {});
+  return true;
+});
+
+ipcMain.handle("write-file", async (_e, path: string, bytes: Uint8Array) => {
+  // Gravação atômica via arquivo temporário na mesma pasta para nunca corromper o PDF em caso de falha
+  const tmp = `${path}.papiro-${process.pid}-${Date.now()}.tmp`;
+  try {
+    await writeFile(tmp, bytes);
+    await rename(tmp, path);
+    return true;
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+});
 
 ipcMain.handle("join-path", (_e, ...parts: string[]) => join(...parts));
 

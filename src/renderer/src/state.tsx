@@ -396,6 +396,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!path) return;
     const target = path;
     await task("Salvando…", async () => {
+      // Confere se o destino pode ser gravado ANTES de chamar engine.save() (que limpa o histórico de Desfazer)
+      try { await window.papiro.checkWritable(target); }
+      catch (e) {
+        throw new Error(`não foi possível gravar em ${target} (${errText(e)}). O arquivo pode estar aberto em outro programa.`);
+      }
       const bytes = await engine.save();
       const name = target.split(/[\\/]/).pop()!;
       try { await window.papiro.writeFile(target, bytes); }
