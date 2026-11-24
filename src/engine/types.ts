@@ -103,6 +103,8 @@ export interface EditTextRequest {
   font: string;      // nome da fonte original (mapeado para uma Base-14)
   maxWidth?: number; // quebra automática de linha
   lineHeight?: number;
+  align?: "left" | "center" | "right";
+  erase?: boolean;   // padrão true; false = apenas inserir texto novo sem redigir área
 }
 
 /** Resultado da edição de texto: quais fontes foram usadas no trecho novo. */
@@ -114,6 +116,47 @@ export interface EditTextResult {
     fallback: boolean;       // alguma letra saiu numa fonte padrão do PDF
     substituted?: number;    // caracteres que não existiam em nenhuma fonte e viraram "?"
   };
+}
+
+export interface CropMargins {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export interface ComparePageDiff {
+  page: number;
+  status: "same" | "changed" | "onlyA" | "onlyB";
+  visualDiffPct: number;
+  added: string[];
+  removed: string[];
+  diffPng: Uint8Array | null;
+}
+
+export interface CompareReport {
+  nameA: string;
+  nameB: string;
+  pagesA: number;
+  pagesB: number;
+  same: number;
+  changed: number;
+  onlyA: number;
+  onlyB: number;
+  pages: ComparePageDiff[];
+}
+
+export type BatchAction =
+  | { kind: "compress"; level: "leve" | "media" | "forte" }
+  | { kind: "watermark"; text: string; opacity?: number; angle?: number; color?: RGB }
+  | { kind: "number"; fmt: string; pos: "bc" | "br" | "bl" | "tc" | "tr" | "tl" }
+  | { kind: "sanitize" }
+  | { kind: "flatten" }
+  | { kind: "ocr"; langs: string };
+
+export interface BatchResult {
+  processed: number;
+  failed: { file: string; error: string }[];
 }
 
 export interface OcrProgress {

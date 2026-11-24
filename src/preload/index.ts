@@ -16,7 +16,7 @@ const api = {
   openDialog: (opts?: { title?: string; images?: boolean; multi?: boolean }): Promise<FileData[]> =>
     ipcRenderer.invoke("open-dialog", opts ?? {}),
   readFile: (path: string): Promise<FileData> => ipcRenderer.invoke("read-file", path),
-  saveDialog: (suggested: string, kind: "pdf" | "png" | "jpg" | "docx" | "txt" = "pdf"): Promise<string | null> =>
+  saveDialog: (suggested: string, kind: "pdf" | "png" | "jpg" | "docx" | "txt" | "csv" = "pdf"): Promise<string | null> =>
     ipcRenderer.invoke("save-dialog", suggested, kind),
   folderDialog: (): Promise<string | null> => ipcRenderer.invoke("folder-dialog"),
   writeFile: (path: string, bytes: Uint8Array): Promise<boolean> => ipcRenderer.invoke("write-file", path, bytes),

@@ -1,9 +1,9 @@
 // Comandos com formulário: proteger, comprimir, cabeçalho/rodapé, numeração,
 // marca d'água, carimbos e exportação de imagens.
-import { engine, type MarginPos, type RGB } from "./api.ts";
-import { makeStamp, STAMP_PRESETS } from "./images.ts";
+import { engine, type BatchAction, type MarginPos, type RGB } from "./api.ts";
+import { makeStamp, prepareImages, STAMP_PRESETS } from "./images.ts";
 import { generatePassword, passwordStrength } from "./password.ts";
-import type { useApp } from "./state.tsx";
+import { OCR_LANGS, type ReadMode, type useApp } from "./state.tsx";
 
 type App = ReturnType<typeof useApp>;
 
@@ -328,4 +328,193 @@ export async function removeWatermarks(a: App): Promise<void> {
   }
   await a.mutate("…", async () => r.info);
   a.notify(`Marca d'água removida de ${r.pages} página(s). Ctrl+Z desfaz.`);
+}
+
+// ---------- planilha CSV ----------
+
+/** Extrai tabelas e dados tabulares para CSV (separador `;`, pronto para abrir no Excel). */
+export async function toCsv(a: App): Promise<void> {
+  const path = await window.papiro.saveDialog(`${base(a)}.csv`, "csv");
+  if (!path) return;
+  await a.task("Extraindo planilha…", async () => {
+    const chars = await engine.saveCsv(path);
+    a.notify(chars > 2 ? `Planilha CSV salva em ${path}.` : `Arquivo salvo em ${path}, mas quase não há texto (use OCR antes se for escaneado).`);
+  });
+}
+
+// ---------- imagem sobre a página ----------
+
+/** Escolhe uma imagem (logo, foto, selo) para colar diretamente sobre uma página existente. */
+export async function chooseOverlayImage(a: App): Promise<void> {
+  const [f] = await window.papiro.openDialog({ title: "Escolher imagem para inserir na página", images: true });
+  if (!f) return;
+  await a.task("Preparando imagem…", async () => {
+    const [bytes] = await prepareImages([f]);
+    const url = URL.createObjectURL(new Blob([bytes as BlobPart]));
+    const img = new Image();
+    img.src = url;
+    try { await img.decode(); } finally { URL.revokeObjectURL(url); }
+    a.setOverlayImg({ bytes, width: img.naturalWidth || 200, height: img.naturalHeight || 200, name: f.name });
+    a.setView("read");
+    a.setTool("overlayimg");
+    a.notify(`Imagem “${f.name}” pronta: clique ou arraste na página para posicionar.`);
+  });
+}
+
+// ---------- recortar e padronizar páginas ----------
+
+const MM_TO_PT = 72 / 25.4;
+
+export async function cropPages(a: App): Promise<void> {
+  const sel = a.view === "organize" && a.selectedPages.length ? [...a.selectedPages].sort((x, y) => x - y) : null;
+  const n = a.doc!.info.pageCount;
+  const v = await a.askForm({
+    title: "Recortar margens da página", okLabel: "Recortar",
+    message: "Informe quanto cortar de cada borda (em milímetros). Ideal para remover bordas pretas de digitalizações. Ctrl+Z desfaz.",
+    fields: [
+      { id: "which", label: "Aplicar em", type: "select", value: sel ? "sel" : "cur", options: [
+        { value: "cur", label: `Página atual (${a.page + 1})` },
+        ...(sel ? [{ value: "sel", label: `Páginas selecionadas (${sel.length})` }] : []),
+        ...(n > 1 ? [{ value: "all", label: `Todas as ${n} páginas` }] : []),
+      ] },
+      { id: "top", label: "Topo (mm)", type: "number", value: "10", span: 3 },
+      { id: "bottom", label: "Base (mm)", type: "number", value: "10", span: 3 },
+      { id: "left", label: "Esquerda (mm)", type: "number", value: "10", span: 3 },
+      { id: "right", label: "Direita (mm)", type: "number", value: "10", span: 3 },
+    ],
+    validate: (f) => {
+      const vals = ["top", "bottom", "left", "right"].map((k) => Number(String(f[k]).replace(",", ".")));
+      if (vals.some((x) => Number.isNaN(x) || x < 0 || x > 200)) return "Informe valores entre 0 e 200 mm.";
+      if (vals.every((x) => x === 0)) return "Informe pelo menos uma margem maior que zero.";
+      return null;
+    },
+  });
+  if (!v) return;
+  const pages = v.which === "all" ? allPages(a) : v.which === "sel" && sel ? sel : [a.page];
+  const mm = (k: string) => Number(String(v[k]).replace(",", ".")) * MM_TO_PT;
+  const ok = await a.mutate("Recortando…", () => engine.cropPages(pages, {
+    top: mm("top"), right: mm("right"), bottom: mm("bottom"), left: mm("left"),
+  }));
+  if (ok) a.notify(`Recorte aplicado em ${pages.length} página(s). Ctrl+Z desfaz.`);
+}
+
+export async function normalizeSizes(a: App): Promise<void> {
+  const sel = a.view === "organize" && a.selectedPages.length ? [...a.selectedPages].sort((x, y) => x - y) : null;
+  const n = a.doc!.info.pageCount;
+  const v = await a.askForm({
+    title: "Padronizar tamanho das páginas", okLabel: "Padronizar",
+    message: "Ajusta e centraliza o conteúdo mantendo a orientação (retrato ou paisagem) de cada página.",
+    fields: [
+      { id: "target", label: "Tamanho padrão", type: "select", value: "A4", span: 3, options: [
+        { value: "A4", label: "A4 (210 × 297 mm)" },
+        { value: "Carta", label: "Carta (216 × 279 mm)" },
+      ] },
+      { id: "which", label: "Aplicar em", type: "select", value: "all", span: 3, options: [
+        { value: "all", label: `Todas as ${n} páginas` },
+        ...(sel ? [{ value: "sel", label: `Selecionadas (${sel.length})` }] : []),
+        { value: "cur", label: `Apenas página ${a.page + 1}` },
+      ] },
+    ],
+  });
+  if (!v) return;
+  const pages = v.which === "cur" ? [a.page] : v.which === "sel" && sel ? sel : allPages(a);
+  const target = v.target as "A4" | "Carta";
+  const ok = await a.mutate("Padronizando páginas…", () => engine.normalizePageSizes(pages, target));
+  if (ok) a.notify(`${pages.length} página(s) padronizada(s) para ${target}. Ctrl+Z desfaz.`);
+}
+
+// ---------- achatar e limpar metadados ----------
+
+export async function flattenPdf(a: App): Promise<void> {
+  const ok = await a.ask({
+    kind: "confirm", title: "Achatar PDF", okLabel: "Achatar",
+    message: "Transforma todas as anotações, assinaturas, carimbos e campos preenchidos em conteúdo fixo da página. Eles não poderão mais ser movidos ou editados como anotações (Ctrl+Z desfaz antes de salvar).",
+  });
+  if (ok === null) return;
+  const r = await a.task("Achatando PDF…", () => engine.flatten());
+  if (!r) return;
+  if (!r.count) { a.notify("Não há anotações nem campos de formulário para achatar."); return; }
+  await a.mutate("…", async () => r.info);
+  a.notify(`${r.count} anotação(ões)/campo(s) achatado(s) no conteúdo da página.`);
+}
+
+export async function sanitizeMetadata(a: App): Promise<void> {
+  const ok = await a.ask({
+    kind: "confirm", title: "Limpar metadados ocultos", okLabel: "Limpar metadados",
+    message: "Remove autor, programa criador, datas, assunto, palavras-chave e fluxos XML (XMP) ocultos do PDF antes de compartilhar.",
+  });
+  if (ok === null) return;
+  const r = await a.task("Limpando metadados…", () => engine.sanitizeMetadata());
+  if (!r) return;
+  await a.mutate("…", async () => r.info);
+  a.notify(r.removed ? `${r.removed} item(ns) de metadados removidos. Salve para gravar o arquivo limpo.` : "O documento já não continha metadados ocultos.");
+}
+
+// ---------- comparar dois PDFs ----------
+
+export async function comparePdf(a: App): Promise<void> {
+  const [f] = await window.papiro.openDialog({ title: "Escolher o segundo PDF para comparar" });
+  if (!f) return;
+  const report = await a.task(`Comparando com ${f.name}…`, () => engine.comparePdf(f.bytes, f.name));
+  if (report) a.setCompareReport(report);
+}
+
+// ---------- ações em lote ----------
+
+export async function batchProcess(a: App): Promise<void> {
+  const files = await window.papiro.openDialog({ title: "Escolher os PDFs para processar em lote", multi: true });
+  if (!files.length) return;
+  const paths = files.map((f) => f.path).filter((p): p is string => !!p);
+  if (!paths.length) { a.notify("Selecione arquivos PDF salvos no disco."); return; }
+  const v = await a.askForm({
+    title: `Ações em lote (${paths.length} arquivo${paths.length > 1 ? "s" : ""})`,
+    okLabel: "Escolher pasta e executar…",
+    message: "Os arquivos originais não são sobrescritos: cada PDF processado será salvo na pasta de destino escolhida.",
+    fields: [
+      { id: "kind", label: "Ação", type: "select", value: "compress", options: [
+        { value: "compress", label: "Comprimir PDFs" },
+        { value: "watermark", label: "Adicionar marca d'água" },
+        { value: "number", label: "Numerar páginas" },
+        { value: "sanitize", label: "Limpar metadados ocultos" },
+        { value: "flatten", label: "Achatar anotações e formulários" },
+        { value: "ocr", label: "Reconhecer texto (OCR nas páginas escaneadas)" },
+      ] },
+      { id: "level", label: "Nível de compressão", type: "select", value: "media", showIf: (f) => f.kind === "compress", options: [
+        { value: "leve", label: "Leve" }, { value: "media", label: "Média" }, { value: "forte", label: "Forte" },
+      ] },
+      { id: "wmText", label: "Texto da marca d'água", type: "text", value: "CONFIDENCIAL", showIf: (f) => f.kind === "watermark" },
+      { id: "numFmt", label: "Formato da numeração", type: "select", value: "Página {p} de {n}", showIf: (f) => f.kind === "number", options: [
+        { value: "{p}", label: "1" }, { value: "Página {p}", label: "Página 1" }, { value: "Página {p} de {n}", label: "Página 1 de 10" },
+      ] },
+      { id: "langs", label: "Idioma do OCR", type: "select", value: a.ocrLang, showIf: (f) => f.kind === "ocr", options: OCR_LANGS },
+    ],
+    validate: (f) => (f.kind === "watermark" && !String(f.wmText).trim() ? "Digite o texto da marca d'água." : null),
+  });
+  if (!v) return;
+  const outDir = await window.papiro.folderDialog();
+  if (!outDir) return;
+  let action: BatchAction;
+  switch (v.kind) {
+    case "compress": action = { kind: "compress", level: v.level as "leve" | "media" | "forte" }; break;
+    case "watermark": action = { kind: "watermark", text: String(v.wmText).trim() }; break;
+    case "number": action = { kind: "number", fmt: String(v.numFmt), pos: "bc" }; break;
+    case "sanitize": action = { kind: "sanitize" }; break;
+    case "flatten": action = { kind: "flatten" }; break;
+    default: action = { kind: "ocr", langs: String(v.langs) }; break;
+  }
+  const r = await a.task(`Processando ${paths.length} arquivo(s)…`, () => engine.batchProcess(paths, outDir, action));
+  if (!r) return;
+  const errNote = r.failed.length ? ` (${r.failed.length} falhou: ${r.failed[0].file} — ${r.failed[0].error})` : "";
+  a.notify(`Lote concluído: ${r.processed}/${paths.length} arquivo(s) gravado(s) em ${outDir}${errNote}.`);
+}
+
+// ---------- modo leitura ----------
+
+const MODES: ReadMode[] = ["normal", "sepia", "dark"];
+const MODE_LABEL: Record<ReadMode, string> = { normal: "Normal", sepia: "Sépia", dark: "Noturno" };
+
+export function cycleReadMode(a: App): void {
+  const next = MODES[(MODES.indexOf(a.readMode) + 1) % MODES.length];
+  a.setReadMode(next);
+  a.notify(`Modo leitura: ${MODE_LABEL[next]}.`);
 }

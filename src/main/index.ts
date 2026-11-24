@@ -199,8 +199,12 @@ const SAVE_FILTERS: Record<string, Electron.FileFilter> = {
   jpg: { name: "Imagem JPEG", extensions: ["jpg"] },
   docx: { name: "Documento do Word", extensions: ["docx"] },
   txt: { name: "Texto", extensions: ["txt"] },
+  csv: { name: "Planilha CSV (Excel)", extensions: ["csv"] },
 };
-const SAVE_TITLES: Record<string, string> = { pdf: "Salvar PDF", png: "Salvar imagem", jpg: "Salvar imagem", docx: "Salvar como Word", txt: "Salvar como texto" };
+const SAVE_TITLES: Record<string, string> = {
+  pdf: "Salvar PDF", png: "Salvar imagem", jpg: "Salvar imagem",
+  docx: "Salvar como Word", txt: "Salvar como texto", csv: "Salvar planilha CSV",
+};
 
 ipcMain.handle("save-dialog", async (_e, suggested: string, kind = "pdf") => {
   if (e2eScript && hooks.save.length) return hooks.save.shift()!;

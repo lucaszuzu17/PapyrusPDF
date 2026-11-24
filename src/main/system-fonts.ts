@@ -25,6 +25,21 @@ function pushName(list: Entry[], rawName: string, file: string, subfont: number)
   list.push({ key: fontKey(n), family: family.toLowerCase(), bold, italic, file, subfont });
 }
 
+// Nomes de arquivo curtos do Windows (usados como fallback se o `reg query` falhar/atrasar).
+const KNOWN_WIN_FILES: Record<string, string> = {
+  arial: "Arial", arialbd: "Arial Bold", ariali: "Arial Italic", arialbi: "Arial Bold Italic",
+  calibri: "Calibri", calibrib: "Calibri Bold", calibrii: "Calibri Italic", calibriz: "Calibri Bold Italic",
+  cambria: "Cambria", cambriab: "Cambria Bold", cambriai: "Cambria Italic", cambriaz: "Cambria Bold Italic",
+  consola: "Consolas", consolab: "Consolas Bold", consolai: "Consolas Italic", consolaz: "Consolas Bold Italic",
+  cour: "Courier New", courbd: "Courier New Bold", couri: "Courier New Italic", courbi: "Courier New Bold Italic",
+  segoeui: "Segoe UI", segoeuib: "Segoe UI Bold", segoeuii: "Segoe UI Italic", segoeuiz: "Segoe UI Bold Italic",
+  seguisym: "Segoe UI Symbol", seguiemj: "Segoe UI Emoji",
+  times: "Times New Roman", timesbd: "Times New Roman Bold", timesi: "Times New Roman Italic", timesbi: "Times New Roman Bold Italic",
+  verdana: "Verdana", verdanab: "Verdana Bold", verdanai: "Verdana Italic", verdanaz: "Verdana Bold Italic",
+  tahoma: "Tahoma", tahomabd: "Tahoma Bold", georgia: "Georgia", georgiab: "Georgia Bold",
+  georgiai: "Georgia Italic", georgiaz: "Georgia Bold Italic", symbol: "Symbol",
+};
+
 function scanDir(dir: string, knownFiles: Set<string>, list: Entry[], depth = 0): void {
   if (depth > 2 || !existsSync(dir)) return;
   let items;
@@ -37,20 +52,24 @@ function scanDir(dir: string, knownFiles: Set<string>, list: Entry[], depth = 0)
     if (knownFiles.has(norm)) continue;
     knownFiles.add(norm);
     const stem = basename(it.name, extname(it.name));
-    // Em pastas de fontes do usuário/Office, o nome do arquivo ou da pasta costuma refletir a família
-    const st = fontStyle(stem);
-    list.push({ key: fontKey(stem), family: st.family.toLowerCase(), bold: st.bold, italic: st.italic, file: full, subfont: 0 });
+    const knownName = KNOWN_WIN_FILES[stem.toLowerCase()];
+    if (knownName) {
+      pushName(list, knownName, full, 0);
+    } else {
+      const st = fontStyle(stem);
+      list.push({ key: fontKey(stem), family: st.family.toLowerCase(), bold: st.bold, italic: st.italic, file: full, subfont: 0 });
+    }
   }
 }
 
 function load(): Entry[] {
-  if (entries) return entries;
-  entries = [];
+  if (entries && entries.length > 0) return entries;
+  const list: Entry[] = [];
   const knownFiles = new Set<string>();
   const fontsDir = join(process.env.WINDIR ?? "C:\\Windows", "Fonts");
   for (const key of KEYS) {
     let out = "";
-    try { out = execFileSync("reg", ["query", key], { encoding: "utf8", windowsHide: true, timeout: 5000 }); } catch { continue; }
+    try { out = execFileSync("reg", ["query", key], { encoding: "utf8", windowsHide: true, timeout: 15000 }); } catch { continue; }
     for (const line of out.split(/\r?\n/)) {
       // "    Arial Bold (TrueType)    REG_SZ    arialbd.ttf"
       const m = /^\s{2,}(.+?)\s+REG_SZ\s+(.+?)\s*$/.exec(line);
@@ -59,15 +78,17 @@ function load(): Entry[] {
       if (!/\.(ttf|otf|ttc)$/i.test(file)) continue;
       knownFiles.add(file.toLowerCase());
       const names = m[1].replace(/\s*\((TrueType|OpenType)\)\s*$/i, "").split(/\s+&\s+/);
-      names.forEach((n, subfont) => pushName(entries!, n, file, subfont));
+      names.forEach((n, subfont) => pushName(list, n, file, subfont));
     }
   }
+  scanDir(fontsDir, knownFiles, list, 2);
   const localApp = process.env.LOCALAPPDATA;
   if (localApp) {
-    scanDir(join(localApp, "Microsoft", "Windows", "Fonts"), knownFiles, entries);
-    scanDir(join(localApp, "Microsoft", "FontCache", "4", "CloudFonts"), knownFiles, entries);
+    scanDir(join(localApp, "Microsoft", "Windows", "Fonts"), knownFiles, list);
+    scanDir(join(localApp, "Microsoft", "FontCache", "4", "CloudFonts"), knownFiles, list);
   }
-  return entries;
+  if (list.length > 0) entries = list;
+  return list;
 }
 
 const cache = new Map<string, { data: Uint8Array; subfont: number; file: string } | null>();

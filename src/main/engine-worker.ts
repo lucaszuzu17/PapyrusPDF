@@ -1,9 +1,10 @@
 // Thread do motor: mantém os documentos abertos (um por aba) e responde às chamadas da interface.
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
 import { PdfEngine, type Recognizer } from "../engine/core.ts";
 import { createRecognizer } from "../engine/ocr-node.ts";
+import type { BatchAction, BatchResult } from "../engine/types.ts";
 import { findSystemFont } from "./system-fonts.ts";
 
 type Call = { id: number; doc: number; method: string; args: unknown[] };
@@ -89,8 +90,70 @@ const special: Record<string, (this: PdfEngine, ...a: any[]) => unknown> = {
   /** Converte para texto (UTF-8 com BOM, que o Bloco de Notas reconhece) e grava em `path`. */
   saveText(path: string) {
     const text = this.exportText();
-    writeFileSync(path, "﻿" + text, "utf8");
+    writeFileSync(path, "\ufeff" + text, "utf8");
     return text.length;
+  },
+  /** Extrai tabelas/dados tabulares em CSV (UTF-8 com BOM e `;`, compatível com Excel pt-BR). */
+  saveCsv(path: string) {
+    const csv = this.exportCsv();
+    writeFileSync(path, "\ufeff" + csv, "utf8");
+    return csv.length;
+  },
+  /** Executa uma ação em lote sobre vários arquivos PDF e grava os resultados em `outDir`. */
+  async batchProcess(paths: string[], outDir: string, action: BatchAction): Promise<BatchResult> {
+    const failed: { file: string; error: string }[] = [];
+    let processed = 0;
+    const rec = action.kind === "ocr" ? await recognizer(action.langs) : null;
+    for (let i = 0; i < paths.length; i++) {
+      const p = paths[i];
+      const name = basename(p);
+      progress(`Lote (${i + 1}/${paths.length}): ${name}`, i, paths.length);
+      const eng = new PdfEngine({ fonts: findSystemFont });
+      try {
+        const bytes = new Uint8Array(readFileSync(p));
+        eng.open(bytes, name.replace(/\.pdf$/i, ""));
+        if (eng.needsPassword()) throw new Error("Arquivo protegido por senha.");
+        let outBytes: Uint8Array;
+        switch (action.kind) {
+          case "compress":
+            outBytes = eng.exportCompressed(action.level).bytes;
+            break;
+          case "watermark":
+            eng.addWatermark({ text: action.text, opacity: action.opacity ?? 0.18, angle: action.angle ?? 45, color: action.color });
+            outBytes = eng.save();
+            break;
+          case "number":
+            eng.addHeaderFooter({ items: [{ pos: action.pos, text: action.fmt }] });
+            outBytes = eng.save();
+            break;
+          case "sanitize":
+            eng.sanitizeMetadata();
+            outBytes = eng.save();
+            break;
+          case "flatten":
+            eng.flatten();
+            outBytes = eng.save();
+            break;
+          case "ocr": {
+            const total = eng.info().pageCount;
+            for (let pg = 0; pg < total; pg++) {
+              if (eng.needsOcr(pg)) await eng.ocrPage(pg, rec!, 300);
+            }
+            outBytes = eng.save();
+            break;
+          }
+        }
+        const outPath = join(outDir, name);
+        writeFileSync(outPath, outBytes);
+        processed++;
+      } catch (e) {
+        failed.push({ file: name, error: e instanceof Error ? e.message : String(e) });
+      } finally {
+        eng.close();
+      }
+    }
+    progress("Lote concluído", paths.length, paths.length);
+    return { processed, failed };
   },
 };
 

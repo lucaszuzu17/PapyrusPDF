@@ -67,6 +67,18 @@ const P: Record<string, JSX.Element> = {
   toText: <><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v4h4" /><path d="M9 11h7M9 14h7M9 17h4" /></>,
   plus: <><path d="M12 5v14M5 12h14" /></>,
   language: <><circle cx="12" cy="12" r="8.5" /><path d="M3.5 12h17M12 3.5c3 3.2 3 13.8 0 17M12 3.5c-3 3.2-3 13.8 0 17" /></>,
+  replace: <><path d="M4 7h10l-3-3M20 17H10l3 3" /><path d="M15 4h5v5M4 15h5v5" /></>,
+  addText: <><path d="M4 6V4h12v2M10 4v14M7 18h6" /><path d="M18 14v6M15 17h6" /></>,
+  overlayImg: <><rect x="3" y="4" width="14" height="12" rx="1" /><circle cx="7.5" cy="8.5" r="1.4" /><path d="M17 12l-3.5-3.5L7 15" /><path d="M18 14v7M14.5 17.5h7" /></>,
+  crop: <><path d="M6 2v14a2 2 0 002 2h14" /><path d="M18 22V8a2 2 0 00-2-2H2" /></>,
+  pageSize: <><rect x="5" y="3" width="14" height="18" rx="1" /><path d="M9 8h6M9 12h6M9 16h4" /></>,
+  flatten: <><path d="M4 17l8 4 8-4M4 12l8 4 8-4M12 3l8 4-8 4-8-4z" /></>,
+  sanitize: <><path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z" /><path d="M9 12l2 2 4-4" /></>,
+  compare: <><rect x="3" y="4" width="8" height="16" rx="1" /><rect x="13" y="4" width="8" height="16" rx="1" /><path d="M6 9h2M16 9h2M16 13h2" /></>,
+  csv: <><rect x="3" y="4" width="18" height="16" rx="1" /><path d="M3 10h18M3 15h18M9 4v16M15 4v16" /></>,
+  ruler: <><path d="M3 15L15 3l6 6L9 21z" /><path d="M7 11l2 2M10 8l2 2M13 5l2 2" /></>,
+  readMode: <><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" /></>,
+  batch: <><rect x="3" y="5" width="12" height="14" rx="1" /><path d="M7 3h10a2 2 0 012 2v12" /><path d="M7 10h4M7 13h4" /></>,
 };
 
 export function Icon({ name, size = 20 }: { name: string; size?: number }) {

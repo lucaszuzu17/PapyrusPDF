@@ -1,7 +1,7 @@
 {
   "name": "papiro-pdf",
   "productName": "PapyrusPDF",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Editor de PDF para Windows, de código aberto e offline (Electron + MuPDF + Tesseract)",
   "author": "lucaszuzu17",
@@ -25,7 +25,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test test/engine.test.ts test/features.test.ts test/review.test.ts test/pacote-a.test.ts test/protecao.test.ts test/text-editing.test.ts",
+    "test": "node --test test/engine.test.ts test/features.test.ts test/review.test.ts test/pacote-a.test.ts test/protecao.test.ts test/text-editing.test.ts test/new-features.test.ts",
     "fixtures": "node test/fixtures.ts",
     "e2e": "electron-vite build && node test/run-e2e.mjs",
     "icon": "node build/make-icon.ts",

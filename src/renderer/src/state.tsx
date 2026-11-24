@@ -1,17 +1,27 @@
 // Estado global do aplicativo e as ações que mexem no documento.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { disposeDoc, engine, engineAt, engineDoc, setEngineDoc, type DocInfo, type SearchHit } from "./api.ts";
+import { disposeDoc, engine, engineAt, engineDoc, setEngineDoc, type CompareReport, type DocInfo, type OutlineNode, type SearchHit } from "./api.ts";
 import { prepareImages } from "./images.ts";
 
 export type Tool =
   | "select" | "hand" | "highlight" | "underline" | "strikeout" | "note" | "freetext"
-  | "ink" | "rect" | "ellipse" | "line" | "arrow" | "signature" | "stamp" | "redact" | "edittext";
+  | "ink" | "rect" | "ellipse" | "line" | "arrow" | "signature" | "stamp" | "redact"
+  | "edittext" | "addtext" | "overlayimg" | "measure";
 
 export type Panel = "pages" | "outline" | "comments" | "search" | null;
 export type RGB = [number, number, number];
 export type View = "read" | "organize";
 /** Uma página por vez (rolagem contínua) ou duas lado a lado. */
 export type Layout = "single" | "double";
+/** Filtro visual da página para leitura confortável (não altera o PDF). */
+export type ReadMode = "normal" | "sepia" | "dark";
+
+export interface OverlayImage {
+  bytes: Uint8Array;
+  width: number;
+  height: number;
+  name: string;
+}
 
 export interface OpenDoc {
   id: number;  // documento no motor (um por aba)
@@ -89,6 +99,10 @@ interface Ctx {
   goTo: (p: number) => void; gotoSignal: { page: number; n: number };
   view: View; setView: (v: View) => void;
   layout: Layout; setLayout: (l: Layout) => void;
+  readMode: ReadMode; setReadMode: (m: ReadMode) => void;
+  measureScale: number; setMeasureScale: (s: number) => void;
+  overlayImg: OverlayImage | null; setOverlayImg: (img: OverlayImage | null) => void;
+  compareReport: CompareReport | null; setCompareReport: (r: CompareReport | null) => void;
   fullscreen: boolean; toggleFullScreen: (on?: boolean) => void;
   panel: Panel; setPanel: (p: Panel) => void;
   selectedPages: number[]; setSelectedPages: (p: number[]) => void;
@@ -129,6 +143,7 @@ export const useApp = () => useContext(C);
 
 const SIG_KEY = "papiro.signature";
 const LAYOUT_KEY = "papiro.layout";
+const READMODE_KEY = "papiro.readMode";
 const OCR_KEY = "papiro.ocrLang";
 const IMAGE_RE = /\.(png|jpe?g|bmp|gif|webp)$/i;
 const baseName = (name: string) => name.replace(/\.pdf$/i, "");
@@ -151,6 +166,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [gotoSignal, setGotoSignal] = useState({ page: 0, n: 0 });
   const [view, setView] = useState<View>("read");
   const [layout, setLayoutRaw] = useState<Layout>(() => (stored(LAYOUT_KEY) === "double" ? "double" : "single"));
+  const [readMode, setReadModeRaw] = useState<ReadMode>(() => {
+    const v = stored(READMODE_KEY);
+    return v === "sepia" || v === "dark" ? v : "normal";
+  });
+  const [measureScale, setMeasureScale] = useState(1);
+  const [overlayImg, setOverlayImg] = useState<OverlayImage | null>(null);
+  const [compareReport, setCompareReport] = useState<CompareReport | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [panel, setPanel] = useState<Panel>("pages");
   const [selectedPages, setSelectedPages] = useState<number[]>([]);
@@ -197,6 +219,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setSignature = (s: string | null) => { setSignatureRaw(s); store(SIG_KEY, s); };
   const setOcrLang = (l: string) => { setOcrLangRaw(l); store(OCR_KEY, l); };
   const setLayout = (l: Layout) => { setLayoutRaw(l); store(LAYOUT_KEY, l); };
+  const setReadMode = (m: ReadMode) => { setReadModeRaw(m); store(READMODE_KEY, m); };
 
   const toggleFullScreen = useCallback((on?: boolean) => {
     const want = on ?? !fullscreen;
@@ -429,17 +452,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
         disposeDoc(id).catch(() => {});
         throw new Error(`“${files[0].name}” é protegido por senha. Abra-o e use Proteger → Remover proteção antes de combinar.`);
       }
+      const bookmarks: OutlineNode[] = [{ title: baseName(files[0].name), page: 0, children: [] }];
       try {
         for (const f of files.slice(1)) {
+          const startPage = info.pageCount;
           try { info = await e.insertFromPdf(f.bytes, -1); }
           catch (err) { throw new Error(`“${f.name}”: ${errText(err)}`); }
+          bookmarks.push({ title: baseName(f.name), page: startPage, children: [] });
         }
+        if (bookmarks.length > 1) info = await e.setOutline(bookmarks);
       } finally {
         // mesmo se um arquivo falhar, a aba nova mostra o que o motor tem aberto
         info = await e.info();
         await loaded(id, "Combinado.pdf", null, info);
       }
-      notify(`${files.length} arquivos combinados (${info.pageCount} páginas). Use Salvar para gravar.`);
+      notify(`${files.length} arquivos combinados (${info.pageCount} páginas) com marcadores criados. Use Salvar para gravar.`);
     });
   }, [task, loaded, notify]);
 
@@ -596,12 +623,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Ctx>(() => ({
     doc, tabs, switchTab, closeTab, cycleTab, tool, setTool, color, setColor, zoom, setZoom, page, setPage, goTo, gotoSignal,
-    view, setView, layout, setLayout, fullscreen, toggleFullScreen,
+    view, setView, layout, setLayout, readMode, setReadMode, measureScale, setMeasureScale,
+    overlayImg, setOverlayImg, compareReport, setCompareReport, fullscreen, toggleFullScreen,
     panel, setPanel, selectedPages, setSelectedPages, search, runSearch, stepSearch, signature, setSignature,
     stamp, setStamp, ocrLang, setOcrLang, busy, toast, notify, progress, scanned, ocrProgress, dialog, closeDialog, ask, askForm,
     openFile, openData, adoptFile, openDropped, save, mergeFiles, newFromImages, insertImages, printDoc, refresh,
     undo, redo, mutate, task, runOcr, fitWidth, viewportWidth,
-  }), [doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout, fullscreen,
+  }), [doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
+    readMode, measureScale, overlayImg, compareReport, fullscreen,
     toggleFullScreen, panel, selectedPages, search, runSearch, stepSearch, signature, stamp, ocrLang, busy, toast, notify,
     progress, scanned, ocrProgress, dialog, ask, askForm, openFile, openData, adoptFile, openDropped, save, mergeFiles,
     newFromImages, insertImages, printDoc, refresh, undo, redo, mutate, task, runOcr, fitWidth]); // eslint-disable-line react-hooks/exhaustive-deps

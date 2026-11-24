@@ -1,15 +1,99 @@
-// Caixas de diálogo: texto, senha, confirmação, formulário e assinatura.
-import { useEffect, useRef, useState } from "react";
+// Caixas de diálogo: texto, senha, confirmação, formulário, assinatura e comparação de PDFs.
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CompareReport } from "./api.ts";
 import { useApp, type FormValues } from "./state.tsx";
 
 export function Dialogs() {
-  const { dialog, closeDialog } = useApp();
+  const { dialog, closeDialog, compareReport, setCompareReport } = useApp();
+  if (compareReport) return <CompareModal report={compareReport} onClose={() => setCompareReport(null)} />;
   if (!dialog) return null;
   return (
     <div className="modal-bg" onPointerDown={(e) => { if (e.target === e.currentTarget) closeDialog(null); }}>
       <div className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}>
         <h2>{dialog.title}</h2>
         {dialog.kind === "signature" ? <SignaturePad onDone={closeDialog} /> : dialog.kind === "form" ? <Form /> : <Basic />}
+      </div>
+    </div>
+  );
+}
+
+function CompareModal({ report, onClose }: { report: CompareReport; onClose: () => void }) {
+  const firstDiff = report.pages.findIndex((p) => p.status !== "same");
+  const [idx, setIdx] = useState(firstDiff >= 0 ? firstDiff : 0);
+  const cur = report.pages[idx] ?? report.pages[0];
+
+  const imgUrl = useMemo(() => {
+    if (!cur?.diffPng) return null;
+    return URL.createObjectURL(new Blob([cur.diffPng as BlobPart], { type: "image/png" }));
+  }, [cur]);
+  useEffect(() => () => { if (imgUrl) URL.revokeObjectURL(imgUrl); }, [imgUrl]);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  const STATUS: Record<string, string> = {
+    same: "Idêntica", changed: "Alterada", onlyA: "Só no original", onlyB: "Só no novo",
+  };
+
+  return (
+    <div className="modal-bg" onPointerDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal compare-modal" role="dialog" aria-modal="true" aria-label="Comparação de PDFs">
+        <h2>Comparação: {report.nameA} ↔ {report.nameB}</h2>
+        <div className="cmp-summary">
+          <span className="cmp-chip same">Idênticas: {report.same}</span>
+          <span className="cmp-chip changed">Alteradas: {report.changed}</span>
+          {report.onlyA > 0 && <span className="cmp-chip onlyA">Só no 1º: {report.onlyA}</span>}
+          {report.onlyB > 0 && <span className="cmp-chip onlyB">Só no 2º: {report.onlyB}</span>}
+        </div>
+        <div className="cmp-body">
+          <div className="cmp-pages">
+            {report.pages.map((p, i) => (
+              <button key={p.page} className={`cmp-pg ${p.status}${i === idx ? " on" : ""}`} onClick={() => setIdx(i)}>
+                <b>Pág. {p.page + 1}</b>
+                <small>{STATUS[p.status]}{p.status === "changed" ? ` (${p.visualDiffPct}%)` : ""}</small>
+              </button>
+            ))}
+          </div>
+          {cur && (
+            <div className="cmp-detail">
+              {cur.status === "same" ? (
+                <p className="empty">Nenhuma diferença visual ou de texto nesta página.</p>
+              ) : (
+                <>
+                  {imgUrl && (
+                    <div className="cmp-vis">
+                      <small>Mapa visual (vermelho = removido/alterado · azul = adicionado)</small>
+                      <img src={imgUrl} alt={`Diferenças na página ${cur.page + 1}`} />
+                    </div>
+                  )}
+                  <div className="cmp-text">
+                    {cur.removed.length > 0 && (
+                      <div className="cmp-list rem">
+                        <b>Removido / Original ({cur.removed.length})</b>
+                        <ul>{cur.removed.map((l, k) => <li key={k}>− {l}</li>)}</ul>
+                      </div>
+                    )}
+                    {cur.added.length > 0 && (
+                      <div className="cmp-list add">
+                        <b>Adicionado / Novo ({cur.added.length})</b>
+                        <ul>{cur.added.map((l, k) => <li key={k}>+ {l}</li>)}</ul>
+                      </div>
+                    )}
+                    {!cur.removed.length && !cur.added.length && (
+                      <p className="empty">O texto extraído é igual; a diferença é apenas visual (imagem, desenho ou posição).</p>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="primary" onClick={onClose}>Fechar</button>
+        </div>
       </div>
     </div>
   );

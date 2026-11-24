@@ -1,12 +1,14 @@
 // Núcleo do editor: tudo o que mexe no PDF passa por aqui.
 // Não depende de Electron nem de interface — pode ser testado direto no Node.
 import * as mupdf from "mupdf";
+import { compareDocuments } from "./compare.ts";
 import { buildDocx, type DocxImage, type DocxPage, type DocxPara, type DocxRun } from "./docx.ts";
 import { fontStyle, genericFontCategory, isSymbolicFont, stripSubset } from "./fontname.ts";
 import { normalizePdfText, originalSource, type GlyphSource } from "./fonts.ts";
+import { buildCsv } from "./tables.ts";
 import { removePageWatermarks } from "./watermarks.ts";
 import type {
-  AnnotInfo, DocInfo, EditTextRequest, EditTextResult, FieldInfo, NewAnnot, OutlineNode,
+  AnnotInfo, CompareReport, CropMargins, DocInfo, EditTextRequest, EditTextResult, FieldInfo, NewAnnot, OutlineNode,
   Point, Quad, Rect, RGB, SearchHit, TextBlock, TextLine,
 } from "./types.ts";
 
@@ -714,8 +716,9 @@ export class PdfEngine {
   // ---------- editar texto ----------
 
   /**
-   * Substitui o texto de uma área: remove só os glifos de texto da área (imagens e vetores ficam)
-   * e escreve o texto novo. Cada letra sai, nesta ordem de preferência:
+   * Substitui o texto de uma área (ou insere texto novo quando `erase === false`):
+   * remove só os glifos de texto da área (imagens e vetores ficam) e escreve o texto novo.
+   * Cada letra sai, nesta ordem de preferência:
    * 1. na própria fonte embutida no PDF, quando ela tem o glifo confirmado (o trecho continua igual ao resto);
    * 2. na mesma fonte instalada no Windows, embutida no PDF (só quando faltou alguma letra);
    * 3. numa das 14 fontes padrão do PDF (WinAnsi), parecida com a original;
@@ -723,19 +726,30 @@ export class PdfEngine {
    */
   editText(req: EditTextRequest): EditTextResult {
     const used = { original: null as string | null, system: null as string | null, fallback: false, substituted: 0 };
-    this.op("Editar texto", () => {
-      const page = this.d().loadPage(req.page);
-      const text = normalizePdfText(req.text);
-      const want = text.replace(/\n/g, "");
-      const hasLatin = /[A-Za-zÀ-ÿ0-9]/.test(want);
-      const symbolic = isSymbolicFont(req.font) && hasLatin;
-      const effFont = symbolic ? "Helvetica" : req.font;
+    this.op(req.erase === false ? "Inserir texto" : "Editar texto", () => {
+      this.applyTextEdit(req, used);
+    });
+    return { info: this.info(), fonts: used };
+  }
 
-      // A fonte original é escolhida antes da redação, que pode tirar dos recursos da página
-      // uma fonte que só esse trecho usava (o objeto continua no documento).
-      const seen = this.charsByFont(page).get(req.font) ?? new Set<string>();
-      const orig = symbolic ? null : originalSource(page.getObject(), req.font, want, seen);
+  /** Implementação interna de edição/inserção de texto (pode ser chamada em lote dentro de uma única `this.op`). */
+  private applyTextEdit(
+    req: EditTextRequest,
+    used: { original: string | null; system: string | null; fallback: boolean; substituted: number },
+  ): void {
+    const page = this.d().loadPage(req.page);
+    const text = normalizePdfText(req.text);
+    const want = text.replace(/\n/g, "");
+    const hasLatin = /[A-Za-zÀ-ÿ0-9]/.test(want);
+    const symbolic = isSymbolicFont(req.font) && hasLatin;
+    const effFont = symbolic ? "Helvetica" : req.font;
 
+    // A fonte original é escolhida antes da redação, que pode tirar dos recursos da página
+    // uma fonte que só esse trecho usava (o objeto continua no documento).
+    const seen = this.charsByFont(page).get(req.font) ?? new Set<string>();
+    const orig = symbolic || req.erase === false ? null : originalSource(page.getObject(), req.font, want, seen);
+
+    if (req.erase !== false) {
       // Se foram informados os retângulos linha a linha, redige cada linha separadamente para
       // não apagar texto de colunas ou células vizinhas.
       const targets = req.areas?.length ? req.areas.map((a) => pad(a, 0.2)) : [pad(req.area, 0.35)];
@@ -746,52 +760,329 @@ export class PdfEngine {
         red.applyRedaction(0, mupdf.PDFPage.REDACT_IMAGE_NONE, mupdf.PDFPage.REDACT_LINE_ART_NONE,
           mupdf.PDFPage.REDACT_TEXT_REMOVE);
       }
-      page.destroy();
+    }
+    page.destroy();
 
-      const b14 = this.base14Source(base14For(effFont));
-      const sources: GlyphSource[] = orig ? [orig] : [];
-      const missing = [...new Set(want)].filter((ch) => !orig?.glyph(ch));
-      // Arial, Times e Courier têm equivalentes entre as fontes padrão: não vale embutir a do Windows por elas
-      const standard = ["Arial", "Times New Roman", "Courier New"].includes(fontStyle(effFont).family);
-      if (missing.length && !(standard && missing.every((ch) => b14.glyph(ch)))) {
-        const sys = this.systemSource(effFont);
-        if (sys && missing.some((ch) => sys.glyph(ch))) sources.push(sys);
+    const b14 = this.base14Source(base14For(effFont));
+    const sources: GlyphSource[] = orig ? [orig] : [];
+    const missing = [...new Set(want)].filter((ch) => !orig?.glyph(ch));
+    // Arial, Times e Courier têm equivalentes entre as fontes padrão: não vale embutir a do Windows por elas
+    const standard = ["Arial", "Times New Roman", "Courier New"].includes(fontStyle(effFont).family);
+    if (missing.length && !(standard && missing.every((ch) => b14.glyph(ch)))) {
+      const sys = this.systemSource(effFont);
+      if (sys && missing.some((ch) => sys.glyph(ch))) sources.push(sys);
+    }
+    sources.push(b14);
+    // Para caracteres ainda ausentes (símbolos Unicode fora de WinAnsi como ✓, →, ≤, ▪, Ω),
+    // recorre a fontes Unicode amplas do Windows em vez de substituir por "?".
+    this.appendUnicodeFallbacks(sources, want, effFont);
+
+    const pick = (ch: string) => {
+      for (const s of sources) { const g = s.glyph(ch); if (g) return { s, g, sub: false }; }
+      return { s: b14, g: b14.glyph("?")!, sub: true };
+    };
+    const measure = (t: string) => ([...t].reduce((w, ch) => w + pick(ch).g.w, 0) / 1000) * req.size;
+    const lines = wrapMeasured(text, measure, req.maxWidth);
+    const lh = req.lineHeight ?? req.size * 1.2;
+    const boxW = req.maxWidth ?? Math.max(0, req.area[2] - req.area[0]);
+    const align = req.align ?? "left";
+    const fonts: Record<string, mupdf.PDFObject> = {};
+    let ops = `BT\n${rg(req.color)}\n`;
+    lines.forEach((ln, k) => {
+      const lw = measure(ln);
+      const dx = align === "center" && boxW > lw ? (boxW - lw) / 2
+        : align === "right" && boxW > lw ? boxW - lw : 0;
+      ops += `1 0 0 -1 ${n3(req.origin[0] + dx)} ${n3(req.origin[1] + k * lh)} Tm\n`;
+      let cur: GlyphSource | null = null, hex = "";
+      const flush = () => { if (cur && hex) ops += `/${cur.key} ${n3(req.size)} Tf <${hex}> Tj\n`; hex = ""; };
+      for (const ch of ln) {
+        const { s, g, sub } = pick(ch);
+        if (s !== cur) { flush(); cur = s; }
+        hex += g.code.toString(16).padStart(s.twoByte ? 4 : 2, "0");
+        fonts[s.key] = s.ref;
+        if (!ch.trim()) continue;
+        if (sub) { used.substituted++; used.fallback = true; }
+        else if (s.kind === "original") used.original = s.label;
+        else if (s.kind === "system") used.system ??= s.label;
+        else used.fallback = true;
       }
-      sources.push(b14);
-      // Para caracteres ainda ausentes (símbolos Unicode fora de WinAnsi como ✓, →, ≤, ▪, Ω),
-      // recorre a fontes Unicode amplas do Windows em vez de substituir por "?".
-      this.appendUnicodeFallbacks(sources, want, effFont);
-
-      const pick = (ch: string) => {
-        for (const s of sources) { const g = s.glyph(ch); if (g) return { s, g, sub: false }; }
-        return { s: b14, g: b14.glyph("?")!, sub: true };
-      };
-      const measure = (t: string) => ([...t].reduce((w, ch) => w + pick(ch).g.w, 0) / 1000) * req.size;
-      const lines = wrapMeasured(text, measure, req.maxWidth);
-      const lh = req.lineHeight ?? req.size * 1.2;
-      const fonts: Record<string, mupdf.PDFObject> = {};
-      let ops = `BT\n${rg(req.color)}\n`;
-      lines.forEach((ln, k) => {
-        ops += `1 0 0 -1 ${n3(req.origin[0])} ${n3(req.origin[1] + k * lh)} Tm\n`;
-        let cur: GlyphSource | null = null, hex = "";
-        const flush = () => { if (cur && hex) ops += `/${cur.key} ${n3(req.size)} Tf <${hex}> Tj\n`; hex = ""; };
-        for (const ch of ln) {
-          const { s, g, sub } = pick(ch);
-          if (s !== cur) { flush(); cur = s; }
-          hex += g.code.toString(16).padStart(s.twoByte ? 4 : 2, "0");
-          fonts[s.key] = s.ref;
-          if (!ch.trim()) continue;
-          if (sub) { used.substituted++; used.fallback = true; }
-          else if (s.kind === "original") used.original = s.label;
-          else if (s.kind === "system") used.system ??= s.label;
-          else used.fallback = true;
-        }
-        flush();
-      });
-      ops += "ET";
-      this.appendContent(req.page, ops, fonts);
+      flush();
     });
-    return { info: this.info(), fonts: used };
+    ops += "ET";
+    this.appendContent(req.page, ops, fonts);
+  }
+
+  /**
+   * Localizar e substituir texto no documento inteiro (ou numa única página), em um único "Desfazer".
+   * Preserva fonte, tamanho, cor e posição originais usando o mesmo motor Unicode de `editText`.
+   */
+  replaceText(
+    needle: string,
+    replacement: string,
+    opts: { page?: number; matchCase?: boolean } = {},
+  ): { count: number; pages: number; info: DocInfo } {
+    if (!needle) return { count: 0, pages: 0, info: this.info() };
+    const esc = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(esc, opts.matchCase ? "g" : "gi");
+    const n = this.d().countPages();
+    const targetPages = opts.page !== undefined ? [opts.page] : Array.from({ length: n }, (_, i) => i);
+    const edits: EditTextRequest[] = [];
+    let count = 0;
+    const touchedPages = new Set<number>();
+
+    for (const pi of targetPages) {
+      if (pi < 0 || pi >= n) continue;
+      for (const b of this.pageText(pi)) {
+        for (const l of b.lines) {
+          const norm = normalizePdfText(l.text);
+          const matches = norm.match(re);
+          if (!matches?.length) continue;
+          const next = norm.replace(re, () => replacement);
+          if (next === norm) continue;
+          count += matches.length;
+          touchedPages.add(pi);
+          edits.push({
+            page: pi,
+            area: l.bbox,
+            areas: [l.bbox],
+            text: next,
+            origin: l.origin,
+            size: l.size,
+            color: l.color,
+            font: l.font,
+          });
+        }
+      }
+    }
+
+    if (edits.length) {
+      const used = { original: null as string | null, system: null as string | null, fallback: false, substituted: 0 };
+      this.op("Substituir texto", () => {
+        for (const req of edits) this.applyTextEdit(req, used);
+      });
+    }
+    return { count, pages: touchedPages.size, info: this.info() };
+  }
+
+  /** Cola uma imagem (logotipo, foto, selo) diretamente sobre o conteúdo de uma página. */
+  addImageToPage(index: number, rect: Rect, imageBytes: Uint8Array): DocInfo {
+    this.op("Inserir imagem na página", () => {
+      const doc = this.d();
+      const img = new mupdf.Image(imageBytes);
+      let ref: mupdf.PDFObject;
+      try { ref = liveImage(doc, img); } finally { img.destroy(); }
+      const key = `PapiroIm${ref.asIndirect()}`;
+      const [x0, y0, x1, y1] = rect;
+      const w = Math.max(4, x1 - x0), h = Math.max(4, y1 - y0);
+      // No espaço de página (y para baixo), a matriz [w 0 0 -h x0 y1] desenha a imagem em pé dentro de rect.
+      const ops = `q ${n3(w)} 0 0 ${n3(-h)} ${n3(x0)} ${n3(y1)} cm /${key} Do Q`;
+      this.appendContent(index, ops, {}, {}, false, { [key]: ref });
+    });
+    return this.info();
+  }
+
+  /** Recorta as margens visuais das páginas indicadas (em pontos; 1 mm ≈ 2,835 pt). Pode ser desfeito. */
+  cropPages(indices: number[], margins: CropMargins): DocInfo {
+    const top = Math.max(0, margins.top), right = Math.max(0, margins.right);
+    const bottom = Math.max(0, margins.bottom), left = Math.max(0, margins.left);
+    if (!top && !right && !bottom && !left) return this.info();
+    this.op("Recortar páginas", () => {
+      for (const i of indices) {
+        const page = this.d().loadPage(i);
+        const obj = page.getObject();
+        const boxObj = obj.getInheritable("CropBox").isArray() ? obj.getInheritable("CropBox") : obj.getInheritable("MediaBox");
+        const box: Rect = [
+          boxObj.get(0).asNumber(), boxObj.get(1).asNumber(),
+          boxObj.get(2).asNumber(), boxObj.get(3).asNumber(),
+        ];
+        const rotObj = obj.getInheritable("Rotate");
+        const rot = rotObj.isNull() ? 0 : ((rotObj.asNumber() % 360) + 360) % 360;
+        // Converte margens visuais (topo/direita/base/esquerda) para o espaço sem rotação do PDF (y para cima)
+        const [mL, mB, mR, mT] = rot === 90
+          ? [top, left, bottom, right]
+          : rot === 180
+            ? [right, top, left, bottom]
+            : rot === 270
+              ? [bottom, right, top, left]
+              : [left, bottom, right, top];
+        const x0 = box[0] + mL, y0 = box[1] + mB, x1 = box[2] - mR, y1 = box[3] - mT;
+        if (x1 - x0 < 36 || y1 - y0 < 36) { page.destroy(); throw new Error("O recorte é grande demais para o tamanho da página."); }
+        page.setPageBox("CropBox", [x0, y0, x1, y1]);
+        page.destroy();
+      }
+    });
+    return this.info();
+  }
+
+  /** Padroniza o tamanho das páginas para A4 ou Carta (mantendo retrato/paisagem e centralizando o conteúdo). */
+  normalizePageSizes(indices: number[], target: "A4" | "Carta"): DocInfo {
+    const [shortSide, longSide] = target === "Carta" ? [612, 792] : [595, 842];
+    this.op(`Padronizar páginas (${target})`, () => {
+      const doc = this.d();
+      for (const i of indices) {
+        const pageObj = doc.findPage(i);
+        const boxObj = pageObj.getInheritable("CropBox").isArray() ? pageObj.getInheritable("CropBox") : pageObj.getInheritable("MediaBox");
+        const x0 = boxObj.get(0).asNumber(), y0 = boxObj.get(1).asNumber();
+        const x1 = boxObj.get(2).asNumber(), y1 = boxObj.get(3).asNumber();
+        const w = x1 - x0, h = y1 - y0;
+        if (!(w > 0 && h > 0)) continue;
+        const [tw, th] = w > h ? [longSide, shortSide] : [shortSide, longSide];
+        if (Math.abs(w - tw) < 1 && Math.abs(h - th) < 1 && Math.abs(x0) < 1 && Math.abs(y0) < 1) continue;
+        const s = Math.min(tw / w, th / h);
+        const tx = (tw - w * s) / 2 - x0 * s;
+        const ty = (th - h * s) / 2 - y0 * s;
+        const old = pageObj.get("Contents");
+        const oldParts: mupdf.PDFObject[] = [];
+        if (old.isArray()) old.forEach((v) => oldParts.push(v));
+        else if (!old.isNull()) oldParts.push(old);
+        let open = 0;
+        try { open = openStates(oldParts.map((v) => (v.isStream() ? v.readStream().asString() : "")).join("\n")); } catch { /* assume equilibrado */ }
+        const arr = doc.newArray();
+        arr.push(doc.addStream(`q ${n3(s)} 0 0 ${n3(s)} ${n3(tx)} ${n3(ty)} cm\n`, {}));
+        for (const v of oldParts) arr.push(v);
+        arr.push(doc.addStream(`\n${"Q\n".repeat(open + 1)}`, {}));
+        pageObj.put("Contents", arr);
+        const nb = doc.newArray();
+        nb.push(0); nb.push(0); nb.push(tw); nb.push(th);
+        pageObj.put("MediaBox", nb);
+        pageObj.put("CropBox", nb);
+      }
+    });
+    return this.info();
+  }
+
+  /** Achata todas as anotações, assinaturas, carimbos e campos preenchidos diretamente no conteúdo das páginas. */
+  flatten(): { count: number; info: DocInfo } {
+    const doc = this.d();
+    const n = doc.countPages();
+    let count = 0;
+    for (let i = 0; i < n; i++) {
+      const p = doc.loadPage(i);
+      count += p.getAnnotations().filter((a) => a.getType() !== "Link").length;
+      p.destroy();
+    }
+    if (count > 0) {
+      this.op("Achatar PDF", () => {
+        this.d().bake(true, true);
+      });
+    }
+    return { count, info: this.info() };
+  }
+
+  /** Remove metadados ocultos (Info: Autor, Criador, Produtor, datas e fluxos XMP /Metadata). */
+  sanitizeMetadata(): { removed: number; info: DocInfo } {
+    let removed = 0;
+    const keys = ["Author", "Creator", "Producer", "Subject", "Keywords", "CreationDate", "ModDate", "Title", "Trapped"];
+    this.op("Limpar metadados", () => {
+      const doc = this.d();
+      const trailer = doc.getTrailer();
+      const infoObj = trailer.get("Info");
+      if (!infoObj.isNull()) {
+        const resolved = infoObj.isIndirect() ? infoObj.resolve() : infoObj;
+        if (resolved.isDictionary()) {
+          for (const k of keys) {
+            if (!resolved.get(k).isNull()) { resolved.delete(k); removed++; }
+          }
+        }
+        trailer.delete("Info");
+      }
+      const root = trailer.get("Root").resolve();
+      if (root.isDictionary() && !root.get("Metadata").isNull()) {
+        root.delete("Metadata");
+        removed++;
+      }
+      const n = doc.countPages();
+      for (let i = 0; i < n; i++) {
+        const p = doc.findPage(i);
+        if (!p.get("Metadata").isNull()) { p.delete("Metadata"); removed++; }
+      }
+    });
+    return { removed, info: this.info() };
+  }
+
+  /** Grava a árvore de marcadores (Sumário / Outlines) no documento. Pode ser desfeito. */
+  setOutline(nodes: OutlineNode[]): DocInfo {
+    this.op("Editar marcadores", () => {
+      const doc = this.d();
+      const root = doc.getTrailer().get("Root").resolve();
+      if (!nodes.length) {
+        root.delete("Outlines");
+        return;
+      }
+      const pageCount = doc.countPages();
+      const outRootDict = doc.newDictionary();
+      outRootDict.put("Type", doc.newName("Outlines"));
+      const outRootRef = doc.addObject(outRootDict);
+
+      const buildLevel = (items: OutlineNode[], parentRef: mupdf.PDFObject): { first: mupdf.PDFObject; last: mupdf.PDFObject; count: number } | null => {
+        if (!items.length) return null;
+        const refs: mupdf.PDFObject[] = [];
+        const dicts: mupdf.PDFObject[] = [];
+        let total = 0;
+        for (const item of items) {
+          const d = doc.newDictionary();
+          d.put("Title", pdfUnicodeString(doc, item.title || "(sem título)"));
+          d.put("Parent", parentRef);
+          const pIdx = Math.max(0, Math.min(pageCount - 1, item.page));
+          if (item.page >= 0 && pageCount > 0) {
+            const dest = doc.newArray();
+            dest.push(doc.findPage(pIdx));
+            dest.push(doc.newName("Fit"));
+            d.put("Dest", dest);
+          }
+          const ref = doc.addObject(d);
+          refs.push(ref);
+          dicts.push(d);
+          total++;
+          if (item.children?.length) {
+            const sub = buildLevel(item.children, ref);
+            if (sub) {
+              d.put("First", sub.first);
+              d.put("Last", sub.last);
+              d.put("Count", sub.count);
+              total += sub.count;
+            }
+          }
+        }
+        for (let i = 0; i < refs.length; i++) {
+          if (i > 0) dicts[i].put("Prev", refs[i - 1]);
+          if (i + 1 < refs.length) dicts[i].put("Next", refs[i + 1]);
+        }
+        return { first: refs[0], last: refs[refs.length - 1], count: total };
+      };
+
+      const top = buildLevel(nodes, outRootRef);
+      if (top) {
+        outRootDict.put("First", top.first);
+        outRootDict.put("Last", top.last);
+        outRootDict.put("Count", top.count);
+        root.put("Outlines", outRootRef);
+      } else {
+        root.delete("Outlines");
+      }
+    });
+    return this.info();
+  }
+
+  /** Extrai tabelas/dados tabulares de todas as páginas em CSV (separador `;`, compatível com Excel). */
+  exportCsv(): string {
+    const n = this.d().countPages();
+    const pages: TextBlock[][] = [];
+    for (let i = 0; i < n; i++) pages.push(this.pageText(i));
+    return buildCsv(pages);
+  }
+
+  /** Compara o documento aberto com outro PDF (texto linha a linha + mapa visual de diferenças). */
+  comparePdf(otherBytes: Uint8Array, otherName = "Outro PDF"): CompareReport {
+    let other: mupdf.PDFDocument | null = null;
+    try { other = mupdf.Document.openDocument(otherBytes, "application/pdf").asPDF(); } catch { /* tratado abaixo */ }
+    if (!other) throw new Error("O arquivo escolhido para comparação não é um PDF válido.");
+    if (other.needsPassword()) { other.destroy(); throw new Error("O arquivo escolhido para comparação é protegido por senha."); }
+    try {
+      return compareDocuments(this.d(), other, this.title || "Documento atual", otherName);
+    } finally {
+      other.destroy();
+    }
   }
 
   /** Acrescenta fontes Unicode genéricas do sistema só para os caracteres que nenhuma fonte anterior cobriu. */
@@ -1237,7 +1528,14 @@ export class PdfEngine {
    * fica isolado em q/Q, e o novo é desenhado no espaço de página do MuPDF
    * (y para baixo) graças à matriz inversa da transformação da página.
    */
-  private appendContent(index: number, ops: string, fonts: Record<string, mupdf.PDFObject>, gstates: Record<string, number> = {}, behind = false): void {
+  private appendContent(
+    index: number,
+    ops: string,
+    fonts: Record<string, mupdf.PDFObject>,
+    gstates: Record<string, number> = {},
+    behind = false,
+    xobjects: Record<string, mupdf.PDFObject> = {},
+  ): void {
     const doc = this.d();
     const page = doc.loadPage(index);
     const pageObj = page.getObject();
@@ -1246,9 +1544,16 @@ export class PdfEngine {
 
     let res = pageObj.getInheritable("Resources");
     if (res.isNull()) { pageObj.put("Resources", doc.newDictionary()); res = pageObj.get("Resources"); }
-    if (res.get("Font").isNull()) res.put("Font", doc.newDictionary());
-    const fontDict = res.get("Font");
-    for (const [key, ref] of Object.entries(fonts)) fontDict.put(key, ref);
+    if (Object.keys(fonts).length) {
+      if (res.get("Font").isNull()) res.put("Font", doc.newDictionary());
+      const fontDict = res.get("Font");
+      for (const [key, ref] of Object.entries(fonts)) fontDict.put(key, ref);
+    }
+    if (Object.keys(xobjects).length) {
+      if (res.get("XObject").isNull()) res.put("XObject", doc.newDictionary());
+      const xoDict = res.get("XObject");
+      for (const [key, ref] of Object.entries(xobjects)) xoDict.put(key, ref);
+    }
     if (Object.keys(gstates).length) {
       if (res.get("ExtGState").isNull()) res.put("ExtGState", doc.newDictionary());
       const gsDict = res.get("ExtGState");
@@ -1516,6 +1821,18 @@ export function winAnsiHex(s: string): string {
     hex += b.toString(16).padStart(2, "0");
   }
   return hex;
+}
+
+function pdfUnicodeString(doc: mupdf.PDFDocument, s: string): mupdf.PDFObject {
+  if (/^[\x20-\x7e]*$/.test(s)) return doc.newString(s);
+  const bytes = new Uint8Array(2 + s.length * 2);
+  bytes[0] = 0xfe; bytes[1] = 0xff;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    bytes[2 + i * 2] = (code >> 8) & 0xff;
+    bytes[3 + i * 2] = code & 0xff;
+  }
+  return doc.newByteString(bytes);
 }
 
 export { mupdf };

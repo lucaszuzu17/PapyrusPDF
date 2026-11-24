@@ -1,6 +1,7 @@
 // Acesso tipado ao motor (que roda numa thread do processo principal).
 import type {
-  AnnotInfo, DocInfo, EditTextRequest, EditTextResult, FieldInfo, NewAnnot, SearchHit, TextBlock,
+  AnnotInfo, BatchAction, BatchResult, CompareReport, CropMargins, DocInfo, EditTextRequest, EditTextResult,
+  FieldInfo, NewAnnot, OutlineNode, Rect, SearchHit, TextBlock,
 } from "../../engine/types.ts";
 
 import type { HeaderFooterSpec, ImagePageOptions, ProtectOptions, WatermarkSpec } from "../../engine/core.ts";
@@ -66,7 +67,18 @@ function engineFor(doc: () => number) {
       call<string[]>("exportImages", dir, base, pages, dpi, format),
     saveDocx: (path: string) => call<number>("saveDocx", path),
     saveText: (path: string) => call<number>("saveText", path),
+    saveCsv: (path: string) => call<number>("saveCsv", path),
     removeWatermarks: () => call<{ removed: number; pages: number; info: DocInfo }>("removeWatermarks"),
+    replaceText: (needle: string, replacement: string, opts?: { page?: number; matchCase?: boolean }) =>
+      call<{ count: number; pages: number; info: DocInfo }>("replaceText", needle, replacement, opts ?? {}),
+    addImageToPage: (page: number, rect: Rect, bytes: Uint8Array) => call<DocInfo>("addImageToPage", page, rect, bytes),
+    cropPages: (pages: number[], margins: CropMargins) => call<DocInfo>("cropPages", pages, margins),
+    normalizePageSizes: (pages: number[], target: "A4" | "Carta") => call<DocInfo>("normalizePageSizes", pages, target),
+    flatten: () => call<{ count: number; info: DocInfo }>("flatten"),
+    sanitizeMetadata: () => call<{ removed: number; info: DocInfo }>("sanitizeMetadata"),
+    setOutline: (nodes: OutlineNode[]) => call<DocInfo>("setOutline", nodes),
+    comparePdf: (otherBytes: Uint8Array, otherName: string) => call<CompareReport>("comparePdf", otherBytes, otherName),
+    batchProcess: (paths: string[], outDir: string, action: BatchAction) => call<BatchResult>("batchProcess", paths, outDir, action),
   };
 }
 

@@ -32,6 +32,9 @@ const HINT: Partial<Record<Tool, string>> = {
   stamp: "Clique onde o carimbo deve ficar. Para trocar de modelo, use Comentar → Carimbo.",
   redact: "Arraste sobre o que deve ser apagado. Depois use “Aplicar redações”.",
   edittext: "Clique num parágrafo para reescrevê-lo. Ctrl+Enter confirma, Esc cancela.",
+  addtext: "Clique em qualquer ponto da página para inserir novo texto. Ctrl+Enter confirma.",
+  overlayimg: "Clique ou arraste na página para posicionar e redimensionar a imagem.",
+  measure: "Arraste entre dois pontos da página para medir a distância (ajuste a escala na barra inferior).",
 };
 
 function Shell() {
@@ -123,6 +126,14 @@ function StatusBar() {
     <footer className="status">
       <span className="hint">{HINT[app.tool]}</span>
       <span className="grow" />
+      {app.tool === "measure" && (
+        <label className="scale-pick" title="Escala da régua (para plantas e desenhos técnicos)">
+          Escala
+          <select value={String(app.measureScale)} onChange={(e) => app.setMeasureScale(Number(e.target.value))}>
+            {[1, 10, 20, 25, 50, 75, 100, 125, 200, 250, 500].map((s) => <option key={s} value={s}>1:{s}</option>)}
+          </select>
+        </label>
+      )}
       <button title="Página anterior" disabled={app.page === 0} onClick={() => app.goTo(app.page - 1)}><Icon name="chevL" size={16} /></button>
       <form onSubmit={(e) => { e.preventDefault(); const p = Number(pg) - 1; if (p >= 0 && p < n) app.goTo(p); }}>
         <input className="pgnum" value={pg} onChange={(e) => setPg(e.target.value)} aria-label="Página" /> / {n}
@@ -195,6 +206,7 @@ function useShortcuts() {
         else if (k === "o") { e.preventDefault(); if (free) app.openFile(); }
         else if (k === "s" && app.doc) { e.preventDefault(); if (free) app.save(e.shiftKey); }
         else if (k === "f" && app.doc) { e.preventDefault(); if (!app.dialog) app.setPanel("search"); }
+        else if (k === "h" && app.doc) { e.preventDefault(); if (!app.dialog) app.setPanel("search"); }
         else if (k === "p") { e.preventDefault(); if (app.doc && free) app.printDoc(); }
         else if (!typing && k === "z" && app.doc) { e.preventDefault(); if (free) { if (e.shiftKey) app.redo(); else app.undo(); } }
         else if (!typing && k === "y" && app.doc) { e.preventDefault(); if (free) app.redo(); }

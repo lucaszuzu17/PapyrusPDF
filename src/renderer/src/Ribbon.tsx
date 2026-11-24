@@ -40,6 +40,8 @@ const TABS: Tab[] = [
       ] },
       { label: "Exportar", cmds: [
         { id: "compress", label: "Comprimir", icon: "compress", needsDoc: true, run: feat.compress, title: "Gravar uma cópia menor (reduz as imagens)" },
+        { id: "compare", label: "Comparar", icon: "compare", needsDoc: true, run: feat.comparePdf, title: "Comparar este PDF com outra versão (texto e visual)" },
+        { id: "batch", label: "Em lote", icon: "batch", run: feat.batchProcess, title: "Aplicar compressão, marca d'água, numeração, limpeza ou OCR em vários PDFs" },
       ] },
       { label: "Ferramentas", cmds: [
         { id: "select", label: "Selecionar", icon: "select", tool: "select", needsDoc: true },
@@ -51,6 +53,8 @@ const TABS: Tab[] = [
         { id: "fit", label: "Ajustar largura", icon: "fitWidth", needsDoc: true, run: (a) => a.fitWidth() },
         { id: "two", label: "Duas páginas", icon: "twoPages", needsDoc: true, on: (a) => a.layout === "double",
           run: (a) => a.setLayout(a.layout === "double" ? "single" : "double"), title: "Mostrar duas páginas lado a lado" },
+        { id: "readMode", label: "Leitura", icon: "readMode", needsDoc: true, on: (a) => a.readMode !== "normal",
+          run: feat.cycleReadMode, title: "Alternar modo de leitura: Normal → Sépia → Noturno" },
         { id: "full", label: "Tela cheia", icon: "fullscreen", needsDoc: true, run: (a) => a.toggleFullScreen(true), title: "Só o documento na tela (F11; Esc sai)" },
       ] },
       { label: "Histórico", cmds: [
@@ -63,6 +67,7 @@ const TABS: Tab[] = [
     id: "convert", label: "Converter", groups: [
       { label: "Do PDF para", cmds: [
         { id: "toWord", label: "Word", icon: "toWord", needsDoc: true, run: feat.toWord, title: "Documento do Word (.docx) com texto, formatação e imagens" },
+        { id: "toCsv", label: "Planilha (CSV)", icon: "csv", needsDoc: true, run: feat.toCsv, title: "Extrair tabelas e dados em CSV para Excel" },
         { id: "toText", label: "Texto", icon: "toText", needsDoc: true, run: feat.toText, title: "Arquivo de texto (.txt) com o texto de todas as páginas" },
         { id: "toImg2", label: "Imagem", icon: "imageOut", needsDoc: true, run: feat.exportImages, title: "Salvar páginas como PNG ou JPEG" },
       ] },
@@ -90,8 +95,9 @@ const TABS: Tab[] = [
         { id: "line", label: "Linha", icon: "line", tool: "line", needsDoc: true },
         { id: "arrow", label: "Seta", icon: "arrow", tool: "arrow", needsDoc: true },
       ] },
-      { label: "Carimbo", cmds: [
+      { label: "Carimbo e medição", cmds: [
         { id: "stamp", label: "Carimbo", icon: "stamp", needsDoc: true, run: feat.chooseStamp, title: "Aprovado, Confidencial, Pago… com data e nome" },
+        { id: "measure", label: "Régua", icon: "ruler", tool: "measure", needsDoc: true, title: "Arraste entre dois pontos para medir distância (com suporte a escala)" },
       ] },
       { label: "Cor", cmds: ["color"] },
     ],
@@ -100,7 +106,13 @@ const TABS: Tab[] = [
     id: "edit", label: "Editar", groups: [
       { label: "Conteúdo", cmds: [
         { id: "et", label: "Editar texto", icon: "editText", tool: "edittext", needsDoc: true,
-          title: "Clique num parágrafo para reescrevê-lo" },
+          title: "Clique num parágrafo para reescrevê-lo com barra de formatação" },
+        { id: "at", label: "Inserir texto", icon: "addText", tool: "addtext", needsDoc: true,
+          title: "Clique em qualquer ponto da página para inserir novo texto Unicode" },
+        { id: "oimg", label: "Inserir imagem", icon: "overlayImg", needsDoc: true, run: feat.chooseOverlayImage,
+          title: "Escolher foto ou logotipo para colar sobre uma página" },
+        { id: "repl", label: "Substituir", icon: "replace", needsDoc: true, run: (a) => a.setPanel("search"),
+          title: "Localizar e substituir texto no documento (Ctrl+H)" },
       ] },
       { label: "Em todas as páginas", cmds: [
         { id: "hf", label: "Cabeçalho e rodapé", icon: "header", needsDoc: true, run: feat.headerFooter, title: "Texto nas margens de todas as páginas" },
@@ -129,6 +141,8 @@ const TABS: Tab[] = [
           if (ok !== null) { await a.mutate("Excluindo…", () => engine.deletePages(t)); a.setSelectedPages([]); }
         } },
         { id: "blank", label: "Em branco", icon: "blank", needsDoc: true, run: (a) => a.mutate("Inserindo…", () => engine.insertBlankPage(Math.max(...targets(a)) + 1)) },
+        { id: "crop", label: "Recortar", icon: "crop", needsDoc: true, run: feat.cropPages, title: "Recortar margens das páginas (em mm)" },
+        { id: "norm", label: "Padronizar", icon: "pageSize", needsDoc: true, run: feat.normalizeSizes, title: "Padronizar páginas para A4 ou Carta" },
       ] },
       { label: "Arquivos", cmds: [
         { id: "insf", label: "Inserir PDF", icon: "insertFile", needsDoc: true, run: async (a) => {
@@ -176,6 +190,10 @@ const TABS: Tab[] = [
         { id: "lock", label: "Proteger com senha", icon: "lock", needsDoc: true, run: feat.protect, title: "Senha para abrir e permissões (imprimir, copiar, alterar)" },
         { id: "unlock", label: "Remover proteção", icon: "unlock", needsDoc: true, enabled: (a) => !!a.doc?.info.encrypted, run: feat.unprotect,
           title: "Gravar uma versão sem senha e sem restrições" },
+      ] },
+      { label: "Integridade", cmds: [
+        { id: "flat", label: "Achatar PDF", icon: "flatten", needsDoc: true, run: feat.flattenPdf, title: "Fixar anotações, assinaturas e campos preenchidos na página" },
+        { id: "sanit", label: "Limpar metadados", icon: "sanitize", needsDoc: true, run: feat.sanitizeMetadata, title: "Remover autor, datas, criador e dados XMP ocultos" },
       ] },
       { label: "Redação", cmds: [
         { id: "red", label: "Marcar área", icon: "redact", tool: "redact", needsDoc: true, title: "Arraste sobre o que deve ser apagado" },

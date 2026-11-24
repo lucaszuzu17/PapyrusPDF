@@ -7,9 +7,29 @@ import { dataUrlBytes } from "./images.ts";
 import { cssFontFamily, fontStyle, isSymbolicFont, normalizePdfText } from "../../engine/fontname.ts";
 
 const TEXT_TOOLS: Tool[] = ["select", "highlight", "underline", "strikeout", "edittext"];
-const DRAG_TOOLS: Tool[] = ["freetext", "rect", "ellipse", "line", "arrow", "redact"];
+const DRAG_TOOLS: Tool[] = ["freetext", "rect", "ellipse", "line", "arrow", "redact", "overlayimg", "measure"];
+const EDIT_COLORS: RGB[] = [[0, 0, 0], [0.1, 0.25, 0.7], [0.8, 0.1, 0.1], [0.1, 0.5, 0.2], [0.4, 0.4, 0.4]];
 
 interface FlatChar { c: string; quad: Quad; line: TextLine }
+interface EditingState {
+  block: TextBlock | null;
+  origin: Point;
+  area: Rect;
+  areas?: Rect[];
+  text: string;
+  initialText: string;
+  font: string;
+  origBold: boolean;
+  origItalic: boolean;
+  size: number;
+  bold: boolean;
+  italic: boolean;
+  color: RGB;
+  align: "left" | "center" | "right";
+  erase: boolean;
+  lineHeight: number;
+  maxWidth: number;
+}
 
 export function PageView({ index, info, visible }: { index: number; info: PageInfo; visible: boolean }) {
   const app = useApp();
@@ -25,8 +45,9 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
   const [ink, setInk] = useState<Point[] | null>(null);
   const [sel, setSel] = useState<[number, number] | null>(null);
   const [selAnnot, setSelAnnot] = useState<number | null>(null);
-  const [editing, setEditing] = useState<{ block: TextBlock; text: string } | null>(null);
+  const [editing, setEditing] = useState<EditingState | null>(null);
   const [freeText, setFreeText] = useState<{ rect: Rect; text: string } | null>(null);
+  const [measured, setMeasured] = useState<{ a: Point; b: Point } | null>(null);
   const moved = useRef(false);
 
   const W = info.width * zoom, H = info.height * zoom;
@@ -71,7 +92,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     engine.pageText(index).then((b) => !dead && setBlocks(b)).catch(() => {});
     return () => { dead = true; };
   }, [visible, needsText, blocks, index, rev]);
-  useEffect(() => { setSel(null); setSelAnnot(null); setEditing(null); setFreeText(null); }, [tool]);
+  useEffect(() => { setSel(null); setSelAnnot(null); setEditing(null); setFreeText(null); setMeasured(null); }, [tool]);
 
   const flat = useMemo<FlatChar[]>(() =>
     (blocks ?? []).flatMap((b) => b.lines.flatMap((l) => l.chars.map((ch) => ({ c: ch.c, quad: ch.quad, line: l })))), [blocks]);
@@ -178,12 +199,79 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
         break;
       case "signature": await placeSignature(p); break;
       case "stamp": await placeStamp(p); break;
+      case "overlayimg": await placeOverlayImage(r, big, p); break;
+      case "measure":
+        if (moved.current) setMeasured({ a: d.a, b: p });
+        else setMeasured(null);
+        break;
+      case "addtext": {
+        const w = Math.max(180, info.x + info.width - p[0] - 24);
+        const sz = 12;
+        setEditing({
+          block: null,
+          origin: [p[0], p[1] + sz * 0.85],
+          area: [p[0], p[1], p[0] + w, p[1] + sz * 1.6],
+          text: "",
+          initialText: "",
+          font: "Helvetica",
+          origBold: false,
+          origItalic: false,
+          size: sz,
+          bold: false,
+          italic: false,
+          color: [0, 0, 0],
+          align: "left",
+          erase: false,
+          lineHeight: sz * 1.25,
+          maxWidth: w,
+        });
+        break;
+      }
       case "edittext": {
         const b = (blocks ?? []).find((bl) => inside(p, bl.bbox));
-        if (b) setEditing({ block: b, text: blockText(b) });
+        if (b) {
+          const l0 = b.lines[0];
+          const st = blockStyle(b);
+          const fs = fontStyle(st.font);
+          const lh = b.lines.length > 1 ? b.lines[1].origin[1] - l0.origin[1] : st.size * 1.2;
+          const txt = blockText(b);
+          setEditing({
+            block: b,
+            origin: l0.origin,
+            area: b.bbox,
+            areas: b.lines.map((l) => l.bbox),
+            text: txt,
+            initialText: txt,
+            font: st.font,
+            origBold: fs.bold,
+            origItalic: fs.italic,
+            size: Math.round(st.size * 10) / 10,
+            bold: fs.bold,
+            italic: fs.italic,
+            color: st.color,
+            align: "left",
+            erase: true,
+            lineHeight: lh > 0 ? lh : st.size * 1.2,
+            maxWidth: b.bbox[2] - b.bbox[0] + 2,
+          });
+        }
         break;
       }
     }
+  };
+
+  const placeOverlayImage = async (r: Rect, big: boolean, p: Point) => {
+    const img = app.overlayImg;
+    if (!img) { app.notify("Escolha uma imagem em Editar → Inserir imagem."); return; }
+    let rect = r;
+    if (!big) {
+      const w = Math.min(200, info.width - 24);
+      const h = (w * img.height) / Math.max(1, img.width);
+      const x = Math.min(Math.max(p[0] - w / 2, info.x + 4), info.x + info.width - w - 4);
+      const y = Math.min(Math.max(p[1] - h / 2, info.y + 4), info.y + info.height - h - 4);
+      rect = [x, y, x + w, y + h];
+    }
+    await app.mutate("Inserindo imagem…", () => engine.addImageToPage(index, rect, img.bytes));
   };
 
   const placeSignature = async (p: Point) => {
@@ -213,18 +301,23 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
 
   const commitEdit = async () => {
     if (!editing) return;
-    const { block, text } = editing;
+    const ed = editing;
     setEditing(null);
-    if (text === blockText(block)) return;
-    const l0 = block.lines[0];
-    const st = blockStyle(block);
-    const lh = block.lines.length > 1 ? block.lines[1].origin[1] - l0.origin[1] : st.size * 1.2;
+    if (ed.erase) {
+      const styleChanged = ed.bold !== ed.origBold || ed.italic !== ed.origItalic || ed.align !== "left"
+        || (ed.block && (Math.abs(ed.size - blockStyle(ed.block).size) > 0.2 || ed.color.join() !== blockStyle(ed.block).color.join()));
+      if (ed.text === ed.initialText && !styleChanged) return;
+    } else if (!ed.text.trim()) {
+      return;
+    }
+    const effFont = styledFontName(ed.font, ed.bold, ed.italic, ed.origBold, ed.origItalic);
+    const lh = ed.block && Math.abs(ed.size - blockStyle(ed.block).size) <= 0.2 ? ed.lineHeight : ed.size * 1.22;
     const out: { fonts: EditTextResult["fonts"] | null } = { fonts: null };
-    const ok = await app.mutate("Editando texto…", async () => {
+    const ok = await app.mutate(ed.erase ? "Editando texto…" : "Inserindo texto…", async () => {
       const r = await engine.editText({
-        page: index, area: block.bbox, areas: block.lines.map((l) => l.bbox), text,
-        origin: l0.origin, size: st.size, color: st.color, font: st.font,
-        maxWidth: block.bbox[2] - block.bbox[0] + 2, lineHeight: lh > 0 ? lh : st.size * 1.2,
+        page: index, area: ed.area, areas: ed.areas, text: ed.text,
+        origin: ed.origin, size: ed.size, color: ed.color, font: effFont,
+        maxWidth: ed.maxWidth, lineHeight: lh, align: ed.align, erase: ed.erase,
       });
       out.fonts = r.fonts;
       return r;
@@ -232,14 +325,14 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     // avisa quando houve substituição por "?" ou quando o texto não saiu todo na fonte do próprio documento
     const f = out.fonts;
     if (ok && f) {
-      const name = fontStyle(st.font).family;
+      const name = fontStyle(effFont).family;
       if ((f.substituted ?? 0) > 0) {
         app.notify(`Atenção: ${f.substituted} caractere(s) não têm suporte em nenhuma fonte disponível e foram substituídos por “?”.`);
-      } else if (f.system && !f.fallback) {
+      } else if (ed.erase && f.system && !f.fallback) {
         app.notify(`Algumas letras não estavam na fonte embutida no PDF; vieram da ${f.system} instalada no Windows, que foi incorporada ao arquivo.`);
-      } else if (f.fallback && (f.original || f.system)) {
+      } else if (ed.erase && f.fallback && (f.original || f.system)) {
         app.notify(`Algumas letras não existem na fonte ${name} nem no Windows e saíram numa fonte padrão do PDF.`);
-      } else if (f.fallback) {
+      } else if (ed.erase && f.fallback) {
         app.notify(`A fonte ${name} não pôde ser reaproveitada neste PDF; o texto saiu numa fonte padrão parecida.`);
       }
     }
@@ -278,10 +371,12 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     return { left: x, top: y, width: (r[2] - r[0]) * zoom, height: (r[3] - r[1]) * zoom, ...extra };
   };
   const selAnn = annots.find((a) => a.id === selAnnot);
-  const cursor = { select: "text", hand: "grab", edittext: "default", signature: "copy", stamp: "copy" }[tool as string] ?? "crosshair";
+  const cursor = { select: "text", hand: "grab", edittext: "default", addtext: "text", signature: "copy", stamp: "copy", overlayimg: "copy", measure: "crosshair" }[tool as string] ?? "crosshair";
+  const activeMeasure = (drag && tool === "measure") ? drag : measured;
+  const pageClass = app.readMode === "normal" ? "page" : `page rm-${app.readMode}`;
 
   return (
-    <div className="page" style={{ width: W, height: H }} data-page={index}>
+    <div className={pageClass} style={{ width: W, height: H }} data-page={index}>
       <canvas ref={canvas} style={{ width: W, height: H }} />
       {!rendered && <div className="page-loading">Carregando página {index + 1}…</div>}
       <div ref={overlay} className="overlay" style={{ cursor }} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}>
@@ -321,30 +416,74 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
         })()}
         {(drag && DRAG_TOOLS.includes(tool)) || ink ? (
           <svg className="preview" width={W} height={H}>
-            {drag && (tool === "line" || tool === "arrow")
-              ? <line x1={toPx(...drag.a)[0]} y1={toPx(...drag.a)[1]} x2={toPx(...drag.b)[0]} y2={toPx(...drag.b)[1]} />
+            {drag && (tool === "line" || tool === "arrow" || tool === "measure")
+              ? <line x1={toPx(...drag.a)[0]} y1={toPx(...drag.a)[1]} x2={toPx(...drag.b)[0]} y2={toPx(...drag.b)[1]} className={tool === "measure" ? "meas" : ""} />
               : drag && tool === "ellipse"
                 ? (() => { const r = norm(drag.a, drag.b); const [x, y] = toPx(r[0], r[1]); const w = (r[2] - r[0]) * zoom, h = (r[3] - r[1]) * zoom; return <ellipse cx={x + w / 2} cy={y + h / 2} rx={w / 2} ry={h / 2} />; })()
                 : drag && (() => { const r = norm(drag.a, drag.b); const [x, y] = toPx(r[0], r[1]); return <rect x={x} y={y} width={(r[2] - r[0]) * zoom} height={(r[3] - r[1]) * zoom} className={tool === "redact" ? "red" : ""} />; })()}
             {ink && <polyline points={ink.map((p) => toPx(...p).join(",")).join(" ")} />}
           </svg>
         ) : null}
-        {editing && (() => {
-          const l0 = editing.block.lines[0];
-          const st = blockStyle(editing.block);
-          const lh = editing.block.lines.length > 1 ? editing.block.lines[1].origin[1] - l0.origin[1] : st.size * 1.2;
-          const r = editing.block.bbox;
-          const boxW = Math.max(r[2] - r[0], 120);
-          const charsPerLine = Math.max(8, Math.floor(boxW / Math.max(4, st.size * 0.52)));
-          const estLines = editing.text.split("\n").reduce((sum, p) => sum + Math.max(1, Math.ceil(p.length / charsPerLine)), 0);
-          const overflows = estLines * lh > (r[3] - r[1]) + lh * 0.6;
-          const edRect: Rect = [r[0] - 2, r[1] - 2, Math.max(r[2], r[0] + 120) + 2, r[3] + st.size * 2];
-          const [wx, wy] = toPx(edRect[0], edRect[3] + 2);
+        {activeMeasure && (() => {
+          const [ax, ay] = toPx(...activeMeasure.a);
+          const [bx, by] = toPx(...activeMeasure.b);
+          const pt = Math.hypot(activeMeasure.b[0] - activeMeasure.a[0], activeMeasure.b[1] - activeMeasure.a[1]);
+          if (pt < 1) return null;
+          const mm = pt * (25.4 / 72) * app.measureScale;
+          const label = formatMeasure(mm, app.measureScale);
           return (
             <>
+              {!drag && (
+                <svg className="preview" width={W} height={H}>
+                  <line x1={ax} y1={ay} x2={bx} y2={by} className="meas" />
+                  <circle cx={ax} cy={ay} r={3.5} className="meas-dot" />
+                  <circle cx={bx} cy={by} r={3.5} className="meas-dot" />
+                </svg>
+              )}
+              <div className="meas-tag" style={{ left: (ax + bx) / 2, top: (ay + by) / 2 - 22 }}>{label}</div>
+            </>
+          );
+        })()}
+        {editing && (() => {
+          const r = editing.area;
+          const lh = editing.block && Math.abs(editing.size - blockStyle(editing.block).size) <= 0.2 ? editing.lineHeight : editing.size * 1.22;
+          const boxW = Math.max(r[2] - r[0], 140);
+          const charsPerLine = Math.max(8, Math.floor(boxW / Math.max(4, editing.size * 0.52)));
+          const estLines = editing.text.split("\n").reduce((sum, p) => sum + Math.max(1, Math.ceil(p.length / charsPerLine)), 0);
+          const overflows = editing.erase && estLines * lh > (r[3] - r[1]) + lh * 0.6;
+          const edRect: Rect = [r[0] - 2, r[1] - 2, Math.max(r[2], r[0] + 140) + 2, r[3] + editing.size * 2];
+          const [tx, ty] = toPx(edRect[0], edRect[1]);
+          const [wx, wy] = toPx(edRect[0], edRect[3] + 2);
+          const keepFocus = (e: { preventDefault: () => void; stopPropagation: () => void }) => { e.preventDefault(); e.stopPropagation(); };
+          return (
+            <>
+              <div className="etbar" style={{ left: Math.max(4, Math.min(tx, W - 320)), top: Math.max(4, ty - 36) }}
+                onMouseDown={keepFocus} onPointerDown={(e) => e.stopPropagation()}>
+                <button type="button" title="Diminuir fonte" onClick={() => setEditing({ ...editing, size: Math.max(6, Math.round((editing.size - 1) * 10) / 10) })}>A−</button>
+                <span className="et-sz">{Math.round(editing.size)}pt</span>
+                <button type="button" title="Aumentar fonte" onClick={() => setEditing({ ...editing, size: Math.min(96, Math.round((editing.size + 1) * 10) / 10) })}>A+</button>
+                <span className="et-sep" />
+                <button type="button" title="Negrito" className={editing.bold ? "on" : ""} onClick={() => setEditing({ ...editing, bold: !editing.bold })}><b>N</b></button>
+                <button type="button" title="Itálico" className={editing.italic ? "on" : ""} onClick={() => setEditing({ ...editing, italic: !editing.italic })}><i>I</i></button>
+                <span className="et-sep" />
+                <button type="button" title="Alinhar à esquerda" className={editing.align === "left" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "left" })}>⯇</button>
+                <button type="button" title="Centralizar" className={editing.align === "center" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "center" })}>≡</button>
+                <button type="button" title="Alinhar à direita" className={editing.align === "right" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "right" })}>⯈</button>
+                <span className="et-sep" />
+                {EDIT_COLORS.map((c) => (
+                  <button key={c.join()} type="button" title="Cor do texto"
+                    className={c.join() === editing.color.join() ? "et-sw on" : "et-sw"}
+                    style={{ background: rgbCss(c) }}
+                    onClick={() => setEditing({ ...editing, color: c })} />
+                ))}
+                <span className="et-sep" />
+                <button type="button" className="et-ok" title="Confirmar (Ctrl+Enter)" onClick={commitEdit}>✓</button>
+                <button type="button" title="Cancelar (Esc)" onClick={() => setEditing(null)}>✕</button>
+              </div>
               <textarea className={overflows ? "editor overflow" : "editor"} autoFocus value={editing.text}
-                style={{ ...box(edRect), fontSize: st.size * zoom, lineHeight: `${lh * zoom}px`,
-                  fontFamily: cssFontFamily(st.font), fontWeight: fontStyle(st.font).bold ? 700 : 400, fontStyle: fontStyle(st.font).italic ? "italic" : "normal", color: rgbCss(st.color) }}
+                placeholder={editing.erase ? undefined : "Digite o texto (Ctrl+Enter confirma)"}
+                style={{ ...box(edRect), fontSize: editing.size * zoom, lineHeight: `${lh * zoom}px`, textAlign: editing.align,
+                  fontFamily: cssFontFamily(editing.font), fontWeight: editing.bold ? 700 : 400, fontStyle: editing.italic ? "italic" : "normal", color: rgbCss(editing.color) }}
                 onPointerDown={(e) => e.stopPropagation()}
                 onChange={(e) => setEditing({ ...editing, text: e.target.value })}
                 onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); if (e.key === "Enter" && e.ctrlKey) commitEdit(); }}
@@ -407,6 +546,25 @@ const norm = (a: Point, b: Point): Rect => [Math.min(a[0], b[0]), Math.min(a[1],
 const inside = (p: Point, r: Rect) => p[0] >= r[0] - 2 && p[0] <= r[2] + 2 && p[1] >= r[1] - 2 && p[1] <= r[3] + 2;
 const area = (r: Rect) => (r[2] - r[0]) * (r[3] - r[1]);
 const rgbCss = (c: number[]) => `rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
+
+/** Nome da fonte com o estilo escolhido na barra flutuante (mantém a original se nada mudou). */
+function styledFontName(baseFont: string, bold: boolean, italic: boolean, origBold: boolean, origItalic: boolean): string {
+  if (bold === origBold && italic === origItalic) return baseFont;
+  const fam = fontStyle(baseFont).family;
+  if (bold && italic) return `${fam}-BoldItalic`;
+  if (bold) return `${fam}-Bold`;
+  if (italic) return `${fam}-Italic`;
+  return fam;
+}
+
+function formatMeasure(mm: number, scale: number): string {
+  const s = mm >= 1000
+    ? `${(mm / 1000).toFixed(2).replace(".", ",")} m`
+    : mm >= 10
+      ? `${(mm / 10).toFixed(2).replace(".", ",")} cm (${mm.toFixed(1).replace(".", ",")} mm)`
+      : `${mm.toFixed(1).replace(".", ",")} mm`;
+  return scale > 1 ? `${s} · 1:${scale}` : s;
+}
 
 /** Estilo predominante do bloco (evita herdar fonte simbólica ou de destaque de uma única linha). */
 function blockStyle(b: TextBlock): { font: string; size: number; color: RGB } {
