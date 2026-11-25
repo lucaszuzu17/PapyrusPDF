@@ -6,13 +6,18 @@ import { buildDocx, type DocxImage, type DocxPage, type DocxPara, type DocxRun }
 import { fontStyle, genericFontCategory, isSymbolicFont, stripSubset } from "./fontname.ts";
 import { normalizePdfText, originalSource, type GlyphSource } from "./fonts.ts";
 import { buildCsv } from "./tables.ts";
+import {
+  pageType3Fonts, recoverType3Font, repairType3FontBBoxes, type3FontObjNum,
+  type Type3FontInfo, type Type3Recovered,
+} from "./type3.ts";
 import { removePageWatermarks } from "./watermarks.ts";
 import type {
   AnnotInfo, CompareReport, CropMargins, DocInfo, EditTextRequest, EditTextResult, FieldInfo, NewAnnot, OutlineNode,
   Point, Quad, Rect, RGB, SearchHit, TextBlock, TextLine,
 } from "./types.ts";
 
-export interface OcrWord { text: string; bbox: Rect } // bbox em pixels da imagem enviada
+export interface OcrSymbol { text: string; bbox: Rect; confidence: number }
+export interface OcrWord { text: string; bbox: Rect; confidence?: number; symbols?: OcrSymbol[] } // bbox em pixels da imagem enviada
 export type Recognizer = (png: Uint8Array) => Promise<OcrWord[]>;
 /** Procura no sistema uma fonte equivalente à do PDF (usada quando a fonte embutida não tem alguma letra). */
 export type FontProvider = (pdfFontName: string) => { data: Uint8Array; subfont?: number; file?: string } | null;
@@ -31,6 +36,8 @@ export class PdfEngine {
   private fontRefs = new Map<string, mupdf.PDFObject>();
   private gsRefs = new Map<string, mupdf.PDFObject>();
   private sysFonts = new Map<string, { font: mupdf.Font; ref: mupdf.PDFObject; label: string }>();
+  private type3Info = new Map<number, Type3FontInfo>();
+  private type3Cache = new Map<string, Type3Recovered>();
   private readonly fontProvider: FontProvider | null;
 
   constructor(opts: { fonts?: FontProvider } = {}) {
@@ -90,6 +97,8 @@ export class PdfEngine {
     this.modified = false;
     this.encrypted = !doc.getTrailer().get("Encrypt").isNull();
     this.forgetRefs();
+    // Repara /FontBBox invertido em fontes Type 3 ANTES de habilitar o histórico de desfazer.
+    this.type3Info = repairType3FontBBoxes(doc);
     doc.enableJournal();
   }
 
@@ -97,6 +106,8 @@ export class PdfEngine {
     this.cancelOpen();
     this.doc?.destroy();
     this.doc = null;
+    this.type3Info.clear();
+    this.type3Cache.clear();
   }
 
   info(): DocInfo {
@@ -391,13 +402,59 @@ export class PdfEngine {
     return png;
   }
 
+  /** Alguma fonte Type 3 sem /ToUnicode ainda precisa de reconhecimento automático? */
+  hasUnmappedType3(page?: number): boolean {
+    if (!this.doc || !this.type3Info.size) return false;
+    const infos = page !== undefined
+      ? pageType3Fonts(this.doc.findPage(page)).map((f) => this.type3Info.get(f.objNum) ?? f)
+      : [...this.type3Info.values()];
+    return infos.some((f) => f.needsRecovery && !this.type3Cache.has(f.fingerprint));
+  }
+
+  /**
+   * Recupera o mapa Unicode (e negrito) das fontes Type 3 sem /ToUnicode usando o reconhecedor OCR.
+   * O resultado fica em cache pela assinatura dos vetores da fonte (sobrevive ao salvamento).
+   */
+  async recoverType3(recognize: Recognizer, page?: number): Promise<number> {
+    const doc = this.d();
+    if (!this.type3Info.size) return 0;
+    const infos = page !== undefined
+      ? pageType3Fonts(doc.findPage(page)).map((f) => this.type3Info.get(f.objNum) ?? f)
+      : [...this.type3Info.values()];
+    let count = 0;
+    const done = new Set<string>();
+    for (const info of infos) {
+      if (!info.needsRecovery || this.type3Cache.has(info.fingerprint) || done.has(info.fingerprint)) continue;
+      done.add(info.fingerprint);
+      const rec = await recoverType3Font(doc, info, recognize);
+      if (this.doc !== doc) return count; // documento foi trocado durante o reconhecimento
+      this.type3Cache.set(info.fingerprint, rec);
+      count++;
+    }
+    return count;
+  }
+
+  private type3ForFont(fontName: string): { info: Type3FontInfo; rec?: Type3Recovered } | null {
+    const objNum = type3FontObjNum(fontName);
+    if (objNum === null) return null;
+    const info = this.type3Info.get(objNum);
+    if (!info) return null;
+    return { info, rec: this.type3Cache.get(info.fingerprint) };
+  }
+
+  private pageHasRecoveredType3(index: number): boolean {
+    if (!this.type3Cache.size || !this.doc) return false;
+    return pageType3Fonts(this.doc.findPage(index)).some((f) => this.type3Cache.has(f.fingerprint));
+  }
+
   /** Texto da página em blocos → linhas → caracteres, com fonte, tamanho e cor predominantes. */
   pageText(index: number): TextBlock[] {
     const page = this.d().loadPage(index);
     const st = page.toStructuredText("preserve-whitespace");
     const blocks: TextBlock[] = [];
     let block: TextBlock | null = null;
-    let line: TextLine | null = null;
+    type RawChar = { c: string; quad: Quad; empty?: boolean };
+    let line: (Omit<TextLine, "chars"> & { chars: RawChar[]; trimmed?: boolean }) | null = null;
     type StyleCount = { font: string; size: number; color: RGB; count: number; symbolic: boolean };
     let styles: Map<string, StyleCount> | null = null;
     st.walk({
@@ -406,42 +463,80 @@ export class PdfEngine {
         line = { bbox: bbox as Rect, text: "", font: "", size: 0, color: [0, 0, 0], origin: [0, 0], chars: [] };
         styles = new Map();
       },
-      onChar(c, origin, font, size, quad, color) {
+      onChar: (c, origin, font, size, quad, color) => {
         if (!line || !styles) return;
-        const fname = font.getName();
+        const rawFname = font.getName();
+        const t3 = this.type3ForFont(rawFname);
+        let ch = c;
+        let fname = rawFname;
+        if (t3) {
+          const cp0 = c.codePointAt(0) ?? 0;
+          const isEmpty = cp0 === 0xfffd || t3.info.emptyCodes.has(cp0)
+            || (t3.info.needsRecovery && !t3.info.codeToGlyphName.has(cp0));
+          if (isEmpty) {
+            line.chars.push({ c: " ", quad: quad as Quad, empty: true });
+            line.trimmed = true;
+            return;
+          }
+          ch = t3.rec?.codeToChar.get(cp0) ?? c;
+          fname = t3.rec?.boldCodes.has(cp0) ? "Helvetica-Bold" : "Helvetica";
+        }
         const rgb = toRGB(color as number[]);
-        if (line.chars.length === 0) {
+        if (!line.font) {
           line.font = fname;
           line.size = size;
           line.origin = [origin[0], origin[1]];
           line.color = rgb;
         }
         // Conta o estilo predominante da linha (ignora espaços e caracteres de área privada como bullets do Word)
-        const cp = c.codePointAt(0) ?? 0;
+        const cp = ch.codePointAt(0) ?? 0;
         const isPua = cp >= 0xe000 && cp <= 0xf8ff;
-        if (c.trim() && !isPua) {
+        if (ch.trim() && !isPua) {
           const sym = isSymbolicFont(fname);
           const k = `${fname}|${Math.round(size * 10)}|${rgb.map((v) => Math.round(v * 100)).join(",")}`;
           const prev = styles.get(k);
           if (prev) prev.count++;
           else styles.set(k, { font: fname, size, color: rgb, count: 1, symbolic: sym });
         }
-        line.text += c;
-        line.chars.push({ c, quad: quad as Quad });
+        line.chars.push({ c: ch, quad: quad as Quad });
       },
       endLine() {
         if (block && line && line.chars.length) {
-          // Prefere a fonte não-simbólica mais frequente na linha (ex.: ignora um bullet em Symbol no início)
-          const list = styles ? [...styles.values()] : [];
-          const nonSym = list.filter((s) => !s.symbolic);
-          const pool = nonSym.length ? nonSym : list;
-          if (pool.length) {
-            pool.sort((a, b) => b.count - a.count);
-            line.font = pool[0].font;
-            line.size = pool[0].size;
-            line.color = pool[0].color;
+          // Remove glifos vazios (.notdef de fontes Type 3) nas pontas e junta espaços repetidos no meio.
+          let raw = line.chars;
+          if (line.trimmed) {
+            let a = 0, b = raw.length - 1;
+            while (a <= b && raw[a].empty) a++;
+            while (b >= a && raw[b].empty) b--;
+            const compacted: RawChar[] = [];
+            for (let k = a; k <= b; k++) {
+              if (raw[k].empty && compacted.length && compacted[compacted.length - 1].empty) continue;
+              compacted.push(raw[k]);
+            }
+            raw = compacted;
           }
-          block.lines.push(line);
+          if (raw.length && raw.some((x) => !x.empty)) {
+            const list = styles ? [...styles.values()] : [];
+            const nonSym = list.filter((s) => !s.symbolic);
+            const pool = nonSym.length ? nonSym : list;
+            if (pool.length) {
+              pool.sort((a, b) => b.count - a.count);
+              line.font = pool[0].font;
+              line.size = pool[0].size;
+              line.color = pool[0].color;
+            }
+            const cleanChars = raw.map(({ c: cc, quad: q }) => ({ c: cc, quad: q }));
+            const bbox = line.trimmed ? quadsBounds(raw.filter((x) => !x.empty).map((x) => x.quad)) : line.bbox;
+            block.lines.push({
+              bbox,
+              text: cleanChars.map((x) => x.c).join(""),
+              font: line.font,
+              size: line.size,
+              color: line.color,
+              origin: line.origin,
+              chars: cleanChars,
+            });
+          }
         }
         line = null;
         styles = null;
@@ -449,14 +544,30 @@ export class PdfEngine {
       endTextBlock() { if (block && block.lines.length) blocks.push(block); block = null; },
     });
     st.destroy(); page.destroy();
-    return blocks;
+    return splitTextBlocks(blocks);
   }
 
   search(needle: string): SearchHit[] {
     const hits: SearchHit[] = [];
-    if (!needle.trim()) return hits;
+    const q = needle.trim();
+    if (!q) return hits;
+    const qLower = q.toLowerCase();
     const n = this.d().countPages();
     for (let i = 0; i < n; i++) {
+      if (this.pageHasRecoveredType3(i)) {
+        for (const b of this.pageText(i)) {
+          for (const l of b.lines) {
+            const lower = l.text.toLowerCase();
+            let pos = 0;
+            while ((pos = lower.indexOf(qLower, pos)) >= 0) {
+              const slice = l.chars.slice(pos, pos + qLower.length);
+              if (slice.length) hits.push({ page: i, quads: [mergeQuads(slice.map((ch) => ch.quad))] });
+              pos += qLower.length;
+            }
+          }
+        }
+        continue;
+      }
       const page = this.d().loadPage(i);
       for (const hit of page.search(needle, null)) hits.push({ page: i, quads: hit as Quad[] });
       page.destroy();
@@ -1202,6 +1313,11 @@ export class PdfEngine {
     const n = this.d().countPages();
     const parts: string[] = [];
     for (let i = 0; i < n; i++) {
+      if (this.pageHasRecoveredType3(i)) {
+        const t = this.pageText(i).map((b) => b.lines.map((l) => l.text.trimEnd()).join("\n")).join("\n\n");
+        parts.push(t.trimEnd());
+        continue;
+      }
       const page = this.d().loadPage(i);
       const st = page.toStructuredText("preserve-whitespace");
       parts.push(st.asText().replace(/[ \t]+\n/g, "\n").trimEnd());
@@ -1244,10 +1360,34 @@ export class PdfEngine {
       },
       beginTextBlock(bbox) { block = { bbox: bbox as Rect, lines: [] }; },
       beginLine(bbox) { line = { bbox: bbox as Rect, chars: [] }; },
-      onChar(c, _o, font, size, _q, color) {
-        line?.chars.push({ c, font: font.getName(), bold: font.isBold(), italic: font.isItalic(), size, color: toRGB(color as number[]) });
+      onChar: (c, _o, font, size, _q, color) => {
+        if (!line) return;
+        const rawFname = font.getName();
+        const t3 = this.type3ForFont(rawFname);
+        let ch = c, fname = rawFname, bold = font.isBold();
+        if (t3) {
+          const cp0 = c.codePointAt(0) ?? 0;
+          const isEmpty = cp0 === 0xfffd || t3.info.emptyCodes.has(cp0)
+            || (t3.info.needsRecovery && !t3.info.codeToGlyphName.has(cp0));
+          if (isEmpty) {
+            if (line.chars.length && line.chars[line.chars.length - 1].c !== " ") {
+              line.chars.push({ c: " ", font: "Helvetica", bold: false, italic: false, size, color: toRGB(color as number[]) });
+            }
+            return;
+          }
+          ch = t3.rec?.codeToChar.get(cp0) ?? c;
+          bold = t3.rec?.boldCodes.has(cp0) ?? false;
+          fname = bold ? "Helvetica-Bold" : "Helvetica";
+        }
+        line.chars.push({ c: ch, font: fname, bold, italic: font.isItalic(), size, color: toRGB(color as number[]) });
       },
-      endLine() { if (block && line && line.chars.length) block.lines.push(line); line = null; },
+      endLine() {
+        if (block && line) {
+          while (line.chars.length && line.chars[line.chars.length - 1].c === " ") line.chars.pop();
+          if (line.chars.some((x) => x.c.trim())) block.lines.push(line);
+        }
+        line = null;
+      },
       endTextBlock() { if (block && block.lines.length) texts.push(block); block = null; },
     });
     st.destroy(); page.destroy();
@@ -1452,7 +1592,7 @@ export class PdfEngine {
     const page = doc.loadPage(index);
     const [bx0, by0] = page.getBounds();
     page.destroy();
-    const words = (await recognize(this.renderPng(index, scale))).filter((w) => w.text.trim());
+    const words = (await recognize(this.renderPng(index, scale))).filter((w) => w.text.trim() && (w.confidence ?? 100) >= 30);
     // o reconhecimento leva segundos: se outro documento foi aberto nesse meio-tempo, não escreve nele
     if (this.doc !== doc) throw new Error("O documento foi trocado durante o reconhecimento de texto.");
     if (!words.length) return { words: 0, info: this.info() };
@@ -1703,6 +1843,67 @@ function randomPassword(): string {
 }
 
 // ---------- utilitários ----------
+
+function quadsBounds(quads: Quad[]): Rect {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const q of quads) {
+    for (let i = 0; i < 8; i += 2) {
+      if (q[i] < x0) x0 = q[i];
+      if (q[i] > x1) x1 = q[i];
+      if (q[i + 1] < y0) y0 = q[i + 1];
+      if (q[i + 1] > y1) y1 = q[i + 1];
+    }
+  }
+  return x0 < Infinity ? [x0, y0, x1, y1] : [0, 0, 0, 0];
+}
+
+function mergeQuads(quads: Quad[]): Quad {
+  const [x0, y0, x1, y1] = quadsBounds(quads);
+  return [x0, y0, x1, y0, x0, y1, x1, y1];
+}
+
+function linesBounds(lines: TextLine[]): Rect {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const l of lines) {
+    if (l.bbox[0] < x0) x0 = l.bbox[0];
+    if (l.bbox[1] < y0) y0 = l.bbox[1];
+    if (l.bbox[2] > x1) x1 = l.bbox[2];
+    if (l.bbox[3] > y1) y1 = l.bbox[3];
+  }
+  return x0 < Infinity ? [x0, y0, x1, y1] : [0, 0, 0, 0];
+}
+
+/**
+ * Divide blocos de texto que o MuPDF juntou indevidamente (ex.: campos de formulário/tabelas
+ * ligados por espaçadores vazios, colunas paralelas sem sobreposição horizontal ou rótulo pequeno
+ * colado em valor maior/negrito). Mantém parágrafos contínuos intactos.
+ */
+function splitTextBlocks(blocks: TextBlock[]): TextBlock[] {
+  const out: TextBlock[] = [];
+  for (const b of blocks) {
+    if (!b.lines.length) continue;
+    let cur: TextLine[] = [b.lines[0]];
+    for (let i = 1; i < b.lines.length; i++) {
+      const prev = cur[cur.length - 1];
+      const next = b.lines[i];
+      const maxSz = Math.max(prev.size, next.size, 1);
+      const minSz = Math.max(Math.min(prev.size, next.size), 1);
+      const vGap = next.bbox[1] - prev.bbox[3];
+      const backJump = next.bbox[3] < prev.bbox[1];
+      const hOverlap = Math.min(prev.bbox[2], next.bbox[2]) >= Math.max(prev.bbox[0], next.bbox[0]) - 2;
+      const sizeJump = maxSz / minSz > 1.22;
+      const weightChanged = fontStyle(prev.font).bold !== fontStyle(next.font).bold;
+      if (vGap > maxSz * 0.85 || backJump || !hOverlap || sizeJump || weightChanged) {
+        out.push({ bbox: linesBounds(cur), lines: cur });
+        cur = [next];
+      } else {
+        cur.push(next);
+      }
+    }
+    out.push({ bbox: linesBounds(cur), lines: cur });
+  }
+  return out;
+}
 
 function toRGB(c: number[]): RGB {
   if (!c || c.length === 0) return [0, 0, 0];

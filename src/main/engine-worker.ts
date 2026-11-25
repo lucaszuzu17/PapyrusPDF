@@ -28,8 +28,35 @@ async function recognizer(langs: string): Promise<Recognizer> {
 const progress = (label: string, done: number, total: number) =>
   parentPort!.postMessage({ event: "progress", data: { label, done, total } });
 
+const recovering = new WeakMap<PdfEngine, Promise<void>>();
+
+/** Garante que fontes Type 3 sem /ToUnicode tenham o texto recuperado antes de extrair/buscar/exportar. */
+async function ensureReadableText(eng: PdfEngine, page?: number): Promise<void> {
+  const inflight = recovering.get(eng);
+  if (inflight) await inflight;
+  if (!eng.hasUnmappedType3(page)) return;
+  const job = (async () => {
+    const rec = await recognizer("por");
+    await eng.recoverType3(rec, page);
+  })();
+  recovering.set(eng, job);
+  try { await job; } finally { if (recovering.get(eng) === job) recovering.delete(eng); }
+}
+
 /** Chamadas que precisam de mais do que o motor (OCR, arquivos, andamento). `this` é o motor da aba. */
 const special: Record<string, (this: PdfEngine, ...a: any[]) => unknown> = {
+  async pageText(index: number) {
+    await ensureReadableText(this, index);
+    return this.pageText(index);
+  },
+  async search(needle: string) {
+    await ensureReadableText(this);
+    return this.search(needle);
+  },
+  async replaceText(needle: string, replacement: string, opts?: { page?: number; matchCase?: boolean }) {
+    await ensureReadableText(this, opts?.page);
+    return this.replaceText(needle, replacement, opts);
+  },
   async ocrPages(pages: number[], dpi = 300, langs = "por") {
     const rec = await recognizer(langs);
     let words = 0;
@@ -82,19 +109,22 @@ const special: Record<string, (this: PdfEngine, ...a: any[]) => unknown> = {
     return out;
   },
   /** Converte para Word e grava em `path`. */
-  saveDocx(path: string) {
+  async saveDocx(path: string) {
+    await ensureReadableText(this);
     const bytes = this.exportDocx((done, total) => progress("Convertendo para Word", done, total));
     writeFileSync(path, bytes);
     return bytes.length;
   },
   /** Converte para texto (UTF-8 com BOM, que o Bloco de Notas reconhece) e grava em `path`. */
-  saveText(path: string) {
+  async saveText(path: string) {
+    await ensureReadableText(this);
     const text = this.exportText();
     writeFileSync(path, "\ufeff" + text, "utf8");
     return text.length;
   },
   /** Extrai tabelas/dados tabulares em CSV (UTF-8 com BOM e `;`, compatível com Excel pt-BR). */
-  saveCsv(path: string) {
+  async saveCsv(path: string) {
+    await ensureReadableText(this);
     const csv = this.exportCsv();
     writeFileSync(path, "\ufeff" + csv, "utf8");
     return csv.length;

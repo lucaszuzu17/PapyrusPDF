@@ -49,8 +49,18 @@ export async function createRecognizer(cachePath: string, langs = "por"): Promis
       for (const p of b.paragraphs) {
         for (const l of p.lines) {
           for (const w of l.words) {
-            if (w.confidence < 30) continue;
-            words.push({ text: w.text, bbox: [w.bbox.x0, w.bbox.y0, w.bbox.x1, w.bbox.y1] });
+            if (!w.text.trim()) continue;
+            const symbols = (w.symbols ?? []).map((s) => ({
+              text: s.text,
+              bbox: [s.bbox.x0, s.bbox.y0, s.bbox.x1, s.bbox.y1] as [number, number, number, number],
+              confidence: s.confidence,
+            }));
+            words.push({
+              text: w.text,
+              bbox: [w.bbox.x0, w.bbox.y0, w.bbox.x1, w.bbox.y1],
+              confidence: w.confidence,
+              symbols,
+            });
           }
         }
       }

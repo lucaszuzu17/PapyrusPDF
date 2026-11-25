@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Versão 0.4.0" src="https://img.shields.io/badge/vers%C3%A3o-0.4.0-e0a24f?style=flat-square">
+  <img alt="Versão 0.5.1" src="https://img.shields.io/badge/vers%C3%A3o-0.5.1-e0a24f?style=flat-square">
   <img alt="Windows 10 e 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-2a2620?style=flat-square">
   <img alt="Electron 45" src="https://img.shields.io/badge/Electron-45-2a2620?style=flat-square">
   <img alt="Motor MuPDF" src="https://img.shields.io/badge/motor-MuPDF-2a2620?style=flat-square">
@@ -19,7 +19,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lucaszuzu17/PapyrusPDF/releases/latest"><b>⬇ Baixar o instalador para Windows</b></a>
+  <a href="https://github.com/lucaszuzu17/PapyrusPDF/releases/latest"><b>⬇ Baixar o instalador para Windows</b></a> ·
+  <a href="CHANGELOG.md"><b>Histórico de mudanças (Changelog)</b></a>
 </p>
 
 <p align="center">
@@ -122,7 +123,7 @@ npm start
 | Comando | O que faz |
 |---|---|
 | `npm run dev` | Abre com recarga automática da interface |
-| `npm test` | 37 testes do motor (abrir, editar, fonte original, anotar, OCR em três idiomas, senha, compressão, marcas d'água, cópia por destinatário, imagens, Word, texto, regressões) |
+| `npm test` | 55 testes do motor (abrir, editar, fonte original, Type 3, anotar, OCR em três idiomas, senha, compressão, marcas d'água, cópia por destinatário, imagens, Word, CSV, comparar, texto, regressões) |
 | `npm run e2e` | 5 cenários no aplicativo real, com mouse e teclado de verdade; capturas em `test/e2e-out/` |
 | `npm run e2e:dist` | Os mesmos cenários no aplicativo empacotado (`dist\win-unpacked`) |
 | `npm run typecheck` | Verificação de tipos |
@@ -143,7 +144,10 @@ src/engine/   núcleo sem interface (MuPDF + tesseract.js), testável direto no 
   core.ts       PdfEngine: abrir, renderizar, texto, busca, anotações, campos, páginas, editar texto, OCR, converter
   fonts.ts      reaproveita a fonte embutida no PDF na edição de texto (lê o ToUnicode e as larguras)
   fontname.ts   nome PostScript da fonte → família e estilo ("TimesNewRomanPS-BoldMT" → Times New Roman, negrito)
+  type3.ts      repara /FontBBox invertido e recupera texto/negrito de fontes vetoriais Type 3 sem /ToUnicode
   docx.ts       monta o .docx (WordprocessingML + ZIP) a partir do texto e das imagens das páginas
+  tables.ts     extrai tabelas e dados tabulares para CSV
+  compare.ts    compara dois PDFs (diferenças de texto e mapa visual)
   watermarks.ts acha e remove marcas d'água (conteúdo marcado, camadas, XObjects e a do Word no cabeçalho)
   ocr-node.ts   OCR offline com os modelos empacotados (@tesseract.js-data/por, eng e spa)
   types.ts      tipos compartilhados com a interface

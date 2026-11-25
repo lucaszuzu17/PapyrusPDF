@@ -228,7 +228,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
         break;
       }
       case "edittext": {
-        const b = (blocks ?? []).find((bl) => inside(p, bl.bbox));
+        const b = (blocks ?? []).filter((bl) => inside(p, bl.bbox)).sort((a, b) => area(a.bbox) - area(b.bbox))[0];
         if (b) {
           const l0 = b.lines[0];
           const st = blockStyle(b);

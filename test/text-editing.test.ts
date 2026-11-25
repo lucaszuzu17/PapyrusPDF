@@ -242,3 +242,120 @@ test("relata substituted quando realmente não há fonte para o caractere", { sk
   });
   assert.equal(r.fonts.substituted, 2);
 });
+
+/** Cria um PDF sintético com fonte Type 3 sem /ToUnicode, /FontBBox invertido [0 0 1 -1] e espaçadores vazios (.notdef). */
+function syntheticType3Pdf(): Uint8Array {
+  const doc = new mupdf.PDFDocument();
+  const cp = doc.newDictionary();
+  // .notdef vazio (espaçador invisível, exatamente como o iText gera em PDFs PDF/A)
+  cp.put(".notdef", doc.addStream("1 0 -10 -10 10 10 d1\n0.01 0 0 0.01 0 0 cm\n", {}));
+  // Glifos vetoriais simples em /1 (H), /2 (I), /3 (O), /4 (L), /5 (A) acima da linha de base (y: 0..72)
+  // /1 = H
+  cp.put("1", doc.addStream("1 0 -10 -10 10 10 d1\n0.01 0 0 0.01 0 0 cm\n8 0 12 72 re 50 0 12 72 re 8 30 54 12 re f\n", {}));
+  // /2 = I
+  cp.put("2", doc.addStream("1 0 -10 -10 10 10 d1\n0.01 0 0 0.01 0 0 cm\n10 0 12 72 re f\n", {}));
+  // /3 = O (moldura retangular)
+  cp.put("3", doc.addStream("1 0 -10 -10 10 10 d1\n0.01 0 0 0.01 0 0 cm\n8 0 12 72 re 48 0 12 72 re 8 0 52 12 re 8 60 52 12 re f\n", {}));
+  // /4 = L
+  cp.put("4", doc.addStream("1 0 -10 -10 10 10 d1\n0.01 0 0 0.01 0 0 cm\n8 0 12 72 re 8 0 46 12 re f\n", {}));
+  // /5 = A
+  cp.put("5", doc.addStream("1 0 -10 -10 10 10 d1\n0.01 0 0 0.01 0 0 cm\n6 0 m 28 72 l 40 72 l 62 0 l 50 0 l 44 20 l 24 20 l 18 0 l f\n", {}));
+
+  const diff = doc.newArray();
+  diff.push(0); diff.push(doc.newName(".notdef"));
+  diff.push(doc.newName("1")); diff.push(doc.newName("2")); diff.push(doc.newName("3"));
+  diff.push(doc.newName("4")); diff.push(doc.newName("5"));
+  const enc = doc.newDictionary();
+  enc.put("Type", doc.newName("Encoding"));
+  enc.put("Differences", diff);
+
+  const bbox = doc.newArray();
+  bbox.push(0); bbox.push(0); bbox.push(1); bbox.push(-1); // invertido de propósito!
+  const fm = doc.newArray();
+  fm.push(1); fm.push(0); fm.push(0); fm.push(1); fm.push(0); fm.push(0);
+  const widths = doc.newArray();
+  for (let i = 0; i <= 5; i++) widths.push(1);
+
+  const font = doc.newDictionary();
+  font.put("Type", doc.newName("Font"));
+  font.put("Subtype", doc.newName("Type3"));
+  font.put("FontBBox", bbox);
+  font.put("FontMatrix", fm);
+  font.put("CharProcs", cp);
+  font.put("Encoding", doc.addObject(enc));
+  font.put("FirstChar", 0);
+  font.put("LastChar", 5);
+  font.put("Widths", widths);
+
+  const fref = doc.addObject(font);
+  const res = doc.newDictionary();
+  const fonts = doc.newDictionary();
+  fonts.put("R11", fref);
+  res.put("Font", fonts);
+
+  // Linha 1: espaçador vazio (.notdef) em y=750; Linha 2: "OLA" em 6pt (y=740); Linha 3: "HOLA" em 10pt (y=726)
+  const ops = [
+    "BT",
+    "/R11 12 Tf 1 0 0 1 40 750 Tm <00> Tj",
+    "/R11 6 Tf 1 0 0 1 45 740 Tm [<03>300<04>300<05>] TJ",
+    "/R11 10 Tf 1 0 0 1 45 726 Tm [<01>250<03>250<04>250<05>] TJ",
+    "/R11 12 Tf 1 0 0 1 40 710 Tm <00> Tj",
+    "ET",
+  ].join("\n");
+  doc.insertPage(-1, doc.addPage([0, 0, 595, 842], 0, res, ops));
+  const out = new Uint8Array(doc.saveToBuffer("garbage,compress").asUint8Array());
+  doc.destroy();
+  return out;
+}
+
+test("Type 3 sem /ToUnicode e com /FontBBox invertido: repara caixas, remove espaçadores vazios, recupera texto e edita", async () => {
+  const pdf = syntheticType3Pdf();
+  const e = new PdfEngine({ fonts: findSystemFont });
+  e.open(pdf, "type3-test");
+
+  // Detecta fonte Type 3 sem /ToUnicode sem marcar documento como alterado
+  assert.equal(e.info().dirty, false);
+  assert.equal(e.hasUnmappedType3(0), true);
+
+  // Mesmo antes do OCR, o /FontBBox invertido já foi reparado: y da caixa fica ACIMA da linha de base (origin[1])
+  // e os espaçadores .notdef vazios foram descartados, separando o rótulo 6pt do valor 10pt em 2 blocos.
+  const rawBlocks = e.pageText(0);
+  assert.equal(rawBlocks.length, 2, `esperava 2 blocos separados (6pt e 10pt), veio ${rawBlocks.length}`);
+  for (const b of rawBlocks) {
+    const l = b.lines[0];
+    assert.ok(l.bbox[1] < l.origin[1], `topo da caixa (${l.bbox[1]}) deve ficar acima da baseline (${l.origin[1]})`);
+    assert.ok(l.bbox[3] <= l.origin[1] + 1, `base da caixa (${l.bbox[3]}) não deve estar deslocada abaixo da baseline (${l.origin[1]})`);
+  }
+
+  // Simula o reconhecedor devolvendo as 2 linhas na folha sintética (18pt, lineGap=32, marginY=36, dpi=200)
+  const dpiScale = 200 / 72;
+  const mockRec = async () => [
+    { text: "OLA", bbox: [35 * dpiScale, (36 + 32 - 14) * dpiScale, 90 * dpiScale, (36 + 32 + 2) * dpiScale] as [number, number, number, number], confidence: 95 },
+    { text: "HOLA", bbox: [35 * dpiScale, (36 + 64 - 14) * dpiScale, 110 * dpiScale, (36 + 64 + 2) * dpiScale] as [number, number, number, number], confidence: 95 },
+  ];
+  const recovered = await e.recoverType3(mockRec, 0);
+  assert.equal(recovered, 1);
+  assert.equal(e.hasUnmappedType3(0), false);
+  assert.equal(e.info().dirty, false, "recuperar texto não deve marcar documento como alterado");
+
+  const blocks = e.pageText(0);
+  assert.equal(blocks.map((b) => b.lines[0].text).join(" | "), "OLA | HOLA");
+  assert.equal(e.search("HOLA").length, 1);
+  assert.match(e.exportText(), /HOLA/);
+
+  // Editar o bloco "HOLA" substitui o texto Type 3 limpo e mantém o cache após salvar
+  const target = blocks[1];
+  const l0 = target.lines[0];
+  const r = e.editText({
+    page: 0, area: target.bbox, areas: [l0.bbox], text: "EDITADO",
+    origin: l0.origin, size: l0.size, color: l0.color, font: l0.font,
+  });
+  assert.equal(r.fonts.substituted, 0);
+  e.save();
+  assert.equal(e.hasUnmappedType3(0), false, "cache por assinatura deve sobreviver ao salvar");
+  const after = e.pageText(0).flatMap((b) => b.lines.map((l) => l.text));
+  assert.ok(after.includes("OLA"), `bloco vizinho deve permanecer intacto: ${after}`);
+  assert.ok(after.includes("EDITADO"), `texto editado deve aparecer: ${after}`);
+  assert.ok(!after.includes("HOLA"), `texto original deve ter sido removido: ${after}`);
+  e.close();
+});
