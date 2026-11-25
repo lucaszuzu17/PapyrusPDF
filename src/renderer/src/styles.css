@@ -123,10 +123,15 @@ button.primary { background: var(--accent); color: var(--accent-ink); padding: 6
 .preview .red { stroke: #d22; fill: rgba(210, 30, 30, 0.12); }
 .field { background: rgba(214, 230, 255, 0.92); border: 1px solid rgba(60, 110, 200, 0.6); border-radius: 2px; padding: 0 3px; color: #000; resize: none; }
 .field.check { margin: 0; accent-color: #2a5bd7; }
-.editor { background: rgba(255, 255, 255, 0.97); border: 2px solid var(--accent); border-radius: 2px; padding: 0; resize: both; z-index: 6; white-space: pre-wrap; overflow: auto; }
+.editor-wrap { z-index: 6; }
+.editor { display: block; background: rgba(255, 255, 255, 0.97); border: 2px solid var(--accent); border-radius: 2px; padding: 0 2px; resize: none; z-index: 6; white-space: pre-wrap; overflow: auto; }
 .editor.overflow { border-color: #d9822b; box-shadow: 0 0 0 2px rgba(217, 130, 43, 0.25); }
+.editor-grip-e { position: absolute; top: 2px; bottom: 10px; right: -5px; width: 10px; cursor: ew-resize; z-index: 7; display: flex; align-items: center; justify-content: center; }
+.editor-grip-e::after { content: ""; width: 4px; height: min(22px, 70%); border-radius: 99px; background: var(--accent); border: 1px solid #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28); transition: transform 0.12s; }
+.editor-grip-e:hover::after { transform: scaleX(1.35); }
+.editor-grip-se { position: absolute; right: -4px; bottom: -4px; width: 11px; height: 11px; border-radius: 2px; background: var(--accent); border: 1.5px solid #fff; cursor: nwse-resize; z-index: 8; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); }
 .editor-warn { position: absolute; z-index: 7; padding: 3px 8px; border-radius: 6px; background: #b45309; color: #fff; font-size: 11px; white-space: nowrap; box-shadow: var(--shadow); pointer-events: none; }
-.editor.ft { padding: 2px 4px; }
+.editor.ft { padding: 2px 4px; resize: both; }
 
 .welcome { display: grid; place-content: center; justify-items: center; text-align: center; min-height: 100%; padding: 24px; color: #f2eee6; gap: 6px; }
 .welcome h1 { font-size: 40px; margin: 0; font-weight: 700; letter-spacing: 0.02em; }

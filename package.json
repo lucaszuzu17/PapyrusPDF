@@ -1,7 +1,7 @@
 {
   "name": "papiro-pdf",
   "productName": "PapyrusPDF",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "Editor de PDF para Windows, de código aberto e offline (Electron + MuPDF + Tesseract)",
   "author": "lucaszuzu17",

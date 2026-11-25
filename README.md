@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Versão 0.5.1" src="https://img.shields.io/badge/vers%C3%A3o-0.5.1-e0a24f?style=flat-square">
+  <img alt="Versão 0.5.2" src="https://img.shields.io/badge/vers%C3%A3o-0.5.2-e0a24f?style=flat-square">
   <img alt="Windows 10 e 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-2a2620?style=flat-square">
   <img alt="Electron 45" src="https://img.shields.io/badge/Electron-45-2a2620?style=flat-square">
   <img alt="Motor MuPDF" src="https://img.shields.io/badge/motor-MuPDF-2a2620?style=flat-square">

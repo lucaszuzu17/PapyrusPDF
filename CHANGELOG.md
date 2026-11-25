@@ -2,6 +2,14 @@
 
 Todas as mudanças relevantes do **PapyrusPDF** são registradas neste arquivo.
 
+## [0.5.2] — 2026-11-25
+
+### Adicionado
+- **Área de edição de texto redimensionável (esticar para frente)**:
+  - Nova alça lateral direita (`⬌`) e alça de canto inferior direito na caixa de edição de texto: arraste para esticar ou encolher a largura em tempo real, fazendo o texto fluir para frente sem quebrar linha nem sobrepor o conteúdo abaixo; duplo clique na borda direita expande até o espaço livre / margem da página.
+  - **Expansão automática em campos de linha única**: ao digitar um texto maior num campo de uma linha (como Nome Empresarial), a área cresce automaticamente para a direita enquanto houver espaço livre antes do próximo campo ou da margem.
+  - A largura esticada é salva no PDF (`maxWidth`), mantendo a remoção restrita apenas à área original do texto.
+
 ## [0.5.1] — 2026-11-25
 
 ### Corrigido

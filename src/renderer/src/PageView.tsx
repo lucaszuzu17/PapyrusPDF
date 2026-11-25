@@ -29,6 +29,10 @@ interface EditingState {
   erase: boolean;
   lineHeight: number;
   maxWidth: number;
+  origMaxWidth: number;
+  freeWidth: number;
+  manualWidth: boolean;
+  boxHeight?: number;
 }
 
 export function PageView({ index, info, visible }: { index: number; info: PageInfo; visible: boolean }) {
@@ -206,6 +210,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
         break;
       case "addtext": {
         const w = Math.max(180, info.x + info.width - p[0] - 24);
+        const pageMaxW = Math.max(80, info.x + info.width - p[0] - 8);
         const sz = 12;
         setEditing({
           block: null,
@@ -224,6 +229,9 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
           erase: false,
           lineHeight: sz * 1.25,
           maxWidth: w,
+          origMaxWidth: w,
+          freeWidth: pageMaxW,
+          manualWidth: false,
         });
         break;
       }
@@ -235,6 +243,12 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
           const fs = fontStyle(st.font);
           const lh = b.lines.length > 1 ? b.lines[1].origin[1] - l0.origin[1] : st.size * 1.2;
           const txt = blockText(b);
+          const origW = Math.max(24, b.bbox[2] - b.bbox[0] + 4);
+          const pageMaxW = Math.max(origW, info.x + info.width - b.bbox[0] - 8);
+          const rightLimit = (blocks ?? [])
+            .filter((o) => o !== b && o.bbox[1] < b.bbox[3] - 1 && o.bbox[3] > b.bbox[1] + 1 && o.bbox[0] >= b.bbox[2] - 2)
+            .reduce((lim, o) => Math.min(lim, o.bbox[0] - b.bbox[0] - 6), pageMaxW);
+          const freeWidth = Math.max(origW, rightLimit);
           setEditing({
             block: b,
             origin: l0.origin,
@@ -252,7 +266,10 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
             align: "left",
             erase: true,
             lineHeight: lh > 0 ? lh : st.size * 1.2,
-            maxWidth: b.bbox[2] - b.bbox[0] + 2,
+            maxWidth: origW,
+            origMaxWidth: origW,
+            freeWidth,
+            manualWidth: false,
           });
         }
         break;
@@ -305,6 +322,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     setEditing(null);
     if (ed.erase) {
       const styleChanged = ed.bold !== ed.origBold || ed.italic !== ed.origItalic || ed.align !== "left"
+        || Math.abs(ed.maxWidth - ed.origMaxWidth) > 2
         || (ed.block && (Math.abs(ed.size - blockStyle(ed.block).size) > 0.2 || ed.color.join() !== blockStyle(ed.block).color.join()));
       if (ed.text === ed.initialText && !styleChanged) return;
     } else if (!ed.text.trim()) {
@@ -447,24 +465,54 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
         {editing && (() => {
           const r = editing.area;
           const lh = editing.block && Math.abs(editing.size - blockStyle(editing.block).size) <= 0.2 ? editing.lineHeight : editing.size * 1.22;
-          const boxW = Math.max(r[2] - r[0], 140);
-          const charsPerLine = Math.max(8, Math.floor(boxW / Math.max(4, editing.size * 0.52)));
-          const estLines = editing.text.split("\n").reduce((sum, p) => sum + Math.max(1, Math.ceil(p.length / charsPerLine)), 0);
+          const pageMaxW = Math.max(40, info.x + info.width - r[0] - 6);
+          const boxW = Math.min(pageMaxW, Math.max(editing.maxWidth, 40));
+          const fontFam = cssFontFamily(editing.font);
+          const estLines = countWrappedLines(editing.text, boxW - 2, fontFam, editing.size, editing.bold, editing.italic);
           const overflows = editing.erase && estLines * lh > (r[3] - r[1]) + lh * 0.6;
-          const edRect: Rect = [r[0] - 2, r[1] - 2, Math.max(r[2], r[0] + 140) + 2, r[3] + editing.size * 2];
+          const minH = Math.max(r[3] - r[1] + 4, estLines * lh + 6);
+          const boxH = Math.max(minH, editing.boxHeight ?? 0);
+          const edRect: Rect = [r[0] - 2, r[1] - 2, r[0] + boxW + 6, r[1] + boxH];
           const [tx, ty] = toPx(edRect[0], edRect[1]);
           const [wx, wy] = toPx(edRect[0], edRect[3] + 2);
           const keepFocus = (e: { preventDefault: () => void; stopPropagation: () => void }) => { e.preventDefault(); e.stopPropagation(); };
+          const updateWithAutoWidth = (next: EditingState): EditingState => {
+            if (next.manualWidth || !next.block || next.block.lines.length !== 1 || next.text.includes("\n")) return next;
+            const need = measureCssText(next.text, cssFontFamily(next.font), next.size, next.bold, next.italic) * 1.06 + 10;
+            const maxWidth = Math.min(next.freeWidth, Math.max(next.origMaxWidth, need));
+            return { ...next, maxWidth };
+          };
+          const startResize = (mode: "e" | "se") => (e: RPE<HTMLDivElement>) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const el = e.currentTarget;
+            el.setPointerCapture(e.pointerId);
+            const sx = e.clientX, sy = e.clientY;
+            const sw = boxW, sh = boxH;
+            const onMove = (ev: globalThis.PointerEvent) => {
+              const nw = Math.min(pageMaxW, Math.max(40, sw + (ev.clientX - sx) / zoom));
+              const nh = mode === "se" ? Math.max(editing.size * 1.4, sh + (ev.clientY - sy) / zoom) : undefined;
+              setEditing((cur) => (cur ? { ...cur, maxWidth: nw, manualWidth: true, ...(nh !== undefined ? { boxHeight: nh } : {}) } : cur));
+            };
+            const onEnd = () => {
+              el.removeEventListener("pointermove", onMove);
+              el.removeEventListener("pointerup", onEnd);
+              el.removeEventListener("pointercancel", onEnd);
+            };
+            el.addEventListener("pointermove", onMove);
+            el.addEventListener("pointerup", onEnd);
+            el.addEventListener("pointercancel", onEnd);
+          };
           return (
             <>
               <div className="etbar" style={{ left: Math.max(4, Math.min(tx, W - 320)), top: Math.max(4, ty - 36) }}
                 onMouseDown={keepFocus} onPointerDown={(e) => e.stopPropagation()}>
-                <button type="button" title="Diminuir fonte" onClick={() => setEditing({ ...editing, size: Math.max(6, Math.round((editing.size - 1) * 10) / 10) })}>A−</button>
+                <button type="button" title="Diminuir fonte" onClick={() => setEditing(updateWithAutoWidth({ ...editing, size: Math.max(6, Math.round((editing.size - 1) * 10) / 10) }))}>A−</button>
                 <span className="et-sz">{Math.round(editing.size)}pt</span>
-                <button type="button" title="Aumentar fonte" onClick={() => setEditing({ ...editing, size: Math.min(96, Math.round((editing.size + 1) * 10) / 10) })}>A+</button>
+                <button type="button" title="Aumentar fonte" onClick={() => setEditing(updateWithAutoWidth({ ...editing, size: Math.min(96, Math.round((editing.size + 1) * 10) / 10) }))}>A+</button>
                 <span className="et-sep" />
-                <button type="button" title="Negrito" className={editing.bold ? "on" : ""} onClick={() => setEditing({ ...editing, bold: !editing.bold })}><b>N</b></button>
-                <button type="button" title="Itálico" className={editing.italic ? "on" : ""} onClick={() => setEditing({ ...editing, italic: !editing.italic })}><i>I</i></button>
+                <button type="button" title="Negrito" className={editing.bold ? "on" : ""} onClick={() => setEditing(updateWithAutoWidth({ ...editing, bold: !editing.bold }))}><b>N</b></button>
+                <button type="button" title="Itálico" className={editing.italic ? "on" : ""} onClick={() => setEditing(updateWithAutoWidth({ ...editing, italic: !editing.italic }))}><i>I</i></button>
                 <span className="et-sep" />
                 <button type="button" title="Alinhar à esquerda" className={editing.align === "left" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "left" })}>⯇</button>
                 <button type="button" title="Centralizar" className={editing.align === "center" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "center" })}>≡</button>
@@ -480,17 +528,30 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
                 <button type="button" className="et-ok" title="Confirmar (Ctrl+Enter)" onClick={commitEdit}>✓</button>
                 <button type="button" title="Cancelar (Esc)" onClick={() => setEditing(null)}>✕</button>
               </div>
-              <textarea className={overflows ? "editor overflow" : "editor"} autoFocus value={editing.text}
-                placeholder={editing.erase ? undefined : "Digite o texto (Ctrl+Enter confirma)"}
-                style={{ ...box(edRect), fontSize: editing.size * zoom, lineHeight: `${lh * zoom}px`, textAlign: editing.align,
-                  fontFamily: cssFontFamily(editing.font), fontWeight: editing.bold ? 700 : 400, fontStyle: editing.italic ? "italic" : "normal", color: rgbCss(editing.color) }}
-                onPointerDown={(e) => e.stopPropagation()}
-                onChange={(e) => setEditing({ ...editing, text: e.target.value })}
-                onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); if (e.key === "Enter" && e.ctrlKey) commitEdit(); }}
-                onBlur={commitEdit} />
+              <div className="editor-wrap" style={box(edRect)} onPointerDown={(e) => e.stopPropagation()}>
+                <textarea className={overflows ? "editor overflow" : "editor"} autoFocus value={editing.text}
+                  placeholder={editing.erase ? undefined : "Digite o texto (Ctrl+Enter confirma)"}
+                  style={{ width: "100%", height: "100%", fontSize: editing.size * zoom, lineHeight: `${lh * zoom}px`, textAlign: editing.align,
+                    fontFamily: fontFam, fontWeight: editing.bold ? 700 : 400, fontStyle: editing.italic ? "italic" : "normal", color: rgbCss(editing.color) }}
+                  onChange={(e) => setEditing(updateWithAutoWidth({ ...editing, text: e.target.value }))}
+                  onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); if (e.key === "Enter" && e.ctrlKey) commitEdit(); }}
+                  onBlur={commitEdit} />
+                <div className="editor-grip-e" title="Arraste para esticar a largura (duplo clique expande)"
+                  onMouseDown={keepFocus}
+                  onPointerDown={startResize("e")}
+                  onDoubleClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const nextW = boxW < editing.freeWidth - 4 ? editing.freeWidth : pageMaxW;
+                    setEditing({ ...editing, maxWidth: nextW, manualWidth: true });
+                  }} />
+                <div className="editor-grip-se" title="Arraste para redimensionar a área"
+                  onMouseDown={keepFocus}
+                  onPointerDown={startResize("se")} />
+              </div>
               {overflows && (
                 <div className="editor-warn" style={{ left: wx, top: wy }}>
-                  Texto ultrapassa a área original e pode sobrepor conteúdo abaixo
+                  Texto ultrapassa a área original — arraste a borda direita para esticar
                 </div>
               )}
             </>
@@ -594,4 +655,36 @@ function blockText(b: TextBlock): string {
     const short = right - l.bbox[2] > l.size * 3;
     return t + (short ? "\n" : " ");
   }).join(""));
+}
+
+let measureCtx: CanvasRenderingContext2D | null = null;
+function measureCssText(text: string, fontFamily: string, size: number, bold: boolean, italic: boolean): number {
+  if (!text) return 0;
+  if (!measureCtx && typeof document !== "undefined") {
+    measureCtx = document.createElement("canvas").getContext("2d");
+  }
+  if (!measureCtx) return text.length * size * 0.55;
+  measureCtx.font = `${italic ? "italic " : ""}${bold ? "700 " : "400 "}${size}px ${fontFamily}`;
+  return measureCtx.measureText(text).width;
+}
+
+function countWrappedLines(text: string, maxWidth: number, fontFamily: string, size: number, bold: boolean, italic: boolean): number {
+  const lim = Math.max(20, maxWidth);
+  let total = 0;
+  for (const para of text.split("\n")) {
+    if (!para) { total++; continue; }
+    let cur = "";
+    let lines = 1;
+    for (const word of para.split(/(\s+)/)) {
+      const next = cur + word;
+      if (cur && measureCssText(next.trimEnd(), fontFamily, size, bold, italic) > lim) {
+        lines++;
+        cur = word.trimStart();
+      } else {
+        cur = next;
+      }
+    }
+    total += lines;
+  }
+  return Math.max(1, total);
 }
