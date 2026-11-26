@@ -11,12 +11,12 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-e0a24f?style=flat-square">
-  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-2a2620?style=flat-square">
-  <img alt="Electron 45" src="https://img.shields.io/badge/Electron-45-2a2620?style=flat-square">
-  <img alt="MuPDF + ONNX" src="https://img.shields.io/badge/engine-MuPDF%20%2B%20ONNX-2a2620?style=flat-square">
-  <img alt="Languages EN / PT / ES" src="https://img.shields.io/badge/UI-EN%20%7C%20PT%20%7C%20ES-2a2620?style=flat-square">
-  <img alt="AGPL-3.0 License" src="https://img.shields.io/badge/license-AGPL--3.0-e0a24f?style=flat-square">
+  <img alt="Version 1.0.0" src="https://img.shields.io/badge/version-1.0.0-c93b2b?style=flat-square">
+  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-1e242b?style=flat-square">
+  <img alt="Electron 45" src="https://img.shields.io/badge/Electron-45-1e242b?style=flat-square">
+  <img alt="MuPDF + ONNX" src="https://img.shields.io/badge/engine-MuPDF%20%2B%20ONNX-1e242b?style=flat-square">
+  <img alt="Languages EN / PT / ES" src="https://img.shields.io/badge/UI-EN%20%7C%20PT%20%7C%20ES-1e242b?style=flat-square">
+  <img alt="AGPL-3.0 License" src="https://img.shields.io/badge/license-AGPL--3.0-d4a24c?style=flat-square">
 </p>
 
 <p align="center">
@@ -32,11 +32,13 @@
 
 | Tab | Capabilities |
 |---|---|
-| **Home** | Open, Save, Save As, **Vector SVG Print**, Combine PDFs, Create from Images, **Convert local HTML / Markdown to PDF**, **Space Audit & Optimizer**, **Compare PDFs** (text + visual diff), **Multi-Step Batch Wizard**, Zoom, Two-Page Spread, Reading Mode (Normal / Sepia / Night), **Offline Read Aloud (TTS)**, Full Screen, **Undo/Redo across saves** |
+| **File (Backstage)** | Recent Documents, Create PDF, Document Properties, Save / Save As, **Advanced Print Dialog with Live Preview** (Scale, Poster Tiling, N-Up, Booklet, Duplex, Grayscale, Print as Image), Export, PDF Optimizer, Action Wizard & **Appearance Switcher** (Light Parchment / Dark Charcoal / System) |
+| **Home** | Open, Save, Save As, **Print**, Combine PDFs, Create from Images, **Convert local HTML / Markdown to PDF**, **Space Audit & Optimizer**, **Compare PDFs** (text + visual diff), **Multi-Step Batch Wizard**, Zoom, Two-Page Spread, Reading Mode (Normal / Sepia / Night), **Offline Read Aloud (TTS)**, Full Screen, **Undo/Redo across saves** |
 | **Convert** | PDF to Word (`.docx`), **Tables to CSV** (Excel), Plain Text (`.txt`), Images (PNG/JPEG); Images, HTML/Markdown, and Combine to PDF |
 | **Comment** | Highlight, Underline, Strikeout, Sticky Notes, Text Boxes, Pencil, Rectangle, Ellipse, Line, Arrow, Stamps (with date & name), **Measurement Ruler** with scale (`1:1` to `1:500`), **Comments Summary Export** (PDF / Markdown / CSV) & sidebar filtering |
-| **Edit** | **Edit existing PDF text** preserving embedded fonts (floating formatting bar + resizable text box + Type 3 font recovery), Add Unicode Text, Add Image, **Add / Edit Clickable Links**, **Find & Replace**, Header & Footer, Page Numbers, **Bates Numbering**, Watermark & **Remove Watermark** (Word, Acrobat, Foxit, PapyrusPDF) |
+| **Edit** | **Edit existing PDF text** preserving embedded fonts (floating formatting bar + resizable text box + Type 3 font recovery + **scanned/OCR PDF background cover**), Add Unicode Text, Add Image, **Add / Edit Clickable Links**, **Find & Replace**, Header & Footer, Page Numbers, **Bates Numbering**, Watermark & **Remove Watermark** (Word, Acrobat, Foxit, PapyrusPDF) |
 | **Organize** | Drag-and-drop Thumbnail Grid, Rotate, Delete, Insert Blank Page, Crop Margins (mm), Standardize to A4 / Letter, **Page Labels (`/PageLabels`)**, Insert PDF or Images, Extract Pages, Split Document |
+| **View** | Single Page, Two-Page Spread, Full Screen, Zoom Controls & Status Slider, Reading Mode (Normal / Sepia / Night), Offline Read Aloud (TTS), Compare PDFs |
 | **Fill & Sign** | Fill interactive forms, Visual Signature (draw or import), Type on PDF, **Interactive Form Builder** (text, multiline, checkbox, dropdown, signature), **Auto-Detect Form Fields**, **Offline Digital Signatures (`.pfx` / `.p12` / ICP-Brasil A1)** & **Signature Verification** |
 | **Protect** | AES-256 Password & Permissions with strength meter and generator, Recipient-Watermarked Copies, Image-Only Rasterized Copies, Remove Security, **Flatten PDF**, **Sanitize Hidden Metadata (Info/XMP)**, Manual Redaction & **Smart Pattern Redaction** (CPF, CNPJ, credit card, email, phone, ZIP/CEP, RG, custom regex + overlay labels) |
 | **Recognize Text** | **Offline Neural OCR (PaddleOCR PP-OCRv4/v5 ONNX)** + Tesseract Best/Fast fallback, **Auto-Orientation (0°/90°/180°/270°)**, **Local Shadow Removal**, Adaptive Contrast, and `±6°` Deskew across Portuguese, English, Spanish & 29 other Latin languages |

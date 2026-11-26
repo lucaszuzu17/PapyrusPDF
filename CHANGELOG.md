@@ -2,6 +2,29 @@
 
 All notable changes to **PapyrusPDF** are documented in this file.
 
+## [1.0.0] — 2026-11-26
+
+### Added
+- **Brand-New Visual Identity & Vector Icons (`build/make-icon.ts`)**:
+  - Redesigned app icon (`icon.ico` / `icon.png`) featuring the folded-ribbon **Monogram P** on deep charcoal (`#1E242B`), parchment cream (`#F6ECDC`), antique gold (`#D4A24C`), and crimson (`#C93B2B`).
+  - Redesigned `.pdf` file-association icon (`file.ico`) with a warm parchment sheet, antique gold dog-ear fold, protruding crimson `PDF` side ribbon tag, and matching folded-ribbon monogram `P`.
+- **Foxit-Inspired Workspace UI & Icon 2 Theme**:
+  - Redesigned **Ribbon** with vector Monogram P brand mark, Quick Access Toolbar (Save, Undo, Redo, Print), crimson **File** button, dedicated **View** tab, quick theme switcher, language selector, and collapsible ribbon toggle.
+  - New full-screen **File Backstage** (`Open / Recent Documents`, `Create`, `Properties`, `Save / Save As`, `Print`, `Export`, `PDF Optimizer`, `Action Wizard`, `Close`, and `Appearance` with **System / Light Parchment / Dark Charcoal** theme cards).
+  - New **Start / Home Screen** accessible from a pinned 🏠 Home tab in the tab bar: **Quick Tools** cards (*Edit PDF*, *Merge PDF*, *Create from Images*, *Batch Wizard*), Windows *Set as Default* shortcut (`ms-settings:defaultapps`), and searchable Recent Documents list/grid with `.pdf` badges.
+  - Upgraded **Status Bar** with first/last page navigation (`|<` `<` `page / N` `>` `>|`) and continuous Zoom slider.
+- **Full Foxit-Style Print Dialog with Live Interactive Preview (`Ctrl+P`)**:
+  - Real Windows printer selection, `Copies`, `Collate`, `Print in grayscale`, `Print as image (300 DPI)`, `Show page border`, and native `System Dialog / Properties` fallback.
+  - **Print Range**: Current view, Current page, All pages, Custom ranges (`1,5-9,12`), Subset (all / odd / even), and Reverse pages.
+  - **4 Print Handling Modes**: **Scale** (`None 100%`, `Fit`, `Shrink`, `Custom %`, `Choose paper by PDF page size`), **Tile Large Pages / Poster** (scale %, overlap mm, cut marks, and live dashed tile grid preview), **Multiple Pages Per Sheet** (`2, 4, 6, 9, 16` N-up with page order & borders), and **Booklet** (saddle-stitch front/back & left/right binding).
+  - **Duplex** (flip on long/short edge), **Auto-Rotate**, **Auto-Center**, **Orientation**, **Paper Size** (`A4`, `Letter`, `A3`, `Legal`, `A5`), **Print What** (`Document & markups` / `Document only`), and **Summarize Comments**.
+  - **Live Preview Panel** displaying real-time `Zoom (%)`, `Document (cm)`, `Paper (cm)`, rendered page/sheet preview, and page slider.
+
+### Fixed
+- **Editing & Erasing Text on Scanned / Rasterized PDFs After OCR** (e.g., rasterized carrier bills and scanned documents):
+  - Fixed a `TypeError` crash in `simpleWidths()` (`src/engine/fonts.ts`) when inspecting Base-14 fonts without a `/FontDescriptor` (such as OCR's invisible text layer), which previously caused `editText` to roll back silently.
+  - Added automatic image-backed text detection in `applyTextEdit()` (`src/engine/core.ts`): when `REDACT_TEXT_REMOVE` removes only an invisible OCR text layer (`3 Tr`) while raster text pixels remain underneath, PapyrusPDF samples the local perimeter background color (white, gray, or dark colored headers), paints a clean background patch before writing the new text (or cleanly erases it when emptied), and auto-adjusts dark-background text contrast.
+
 ## [0.6.0] — 2026-11-25
 
 ### Added
