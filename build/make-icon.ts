@@ -1,19 +1,20 @@
 // Desenha os ícones em vetor com o próprio MuPDF: node build/make-icon.ts
-//   build/icon.ico  programa (bloco escuro, monograma "P" dobrado em creme e âmbar)
-//   build/file.ico  arquivo .pdf (folha creme com etiqueta lateral âmbar "PDF" e monograma "P")
+//   build/icon.ico  programa (bloco carvão #1E242B, monograma "P" dobrado creme/dourado/vermelho)
+//   build/file.ico  arquivo .pdf (folha creme com dobra dourada, etiqueta lateral vermelha "PDF" e monograma "P")
 //   build/icon.png  512 px, para referência, README e Electron em desenvolvimento
 // Nos tamanhos pequenos (até 24 px) os detalhes simplificam e os traços engrossam para manter legibilidade.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mupdf } from "../src/engine/core.ts";
 
-const INK = "#2a2620";
-const AMBER = "#e0a24f";
-const AMBER_MID = "#c48433";
-const AMBER_DARK = "#8f5b1c";
-const CREAM = "#f3e3c8";
-const CREAM_SHADE = "#dfd0b4";
-const EDGE = "#5a5145";
+const INK = "#1e242b";
+const EDGE = "#3b4554";
+const PAGE_EDGE = "#8e8678";
+const CREAM = "#f6ecdc";
+const CREAM_SHADE = "#e3d6c0";
+const GOLD = "#d4a24c";
+const RED = "#c93b2b";
+const RED_DARK = "#8b2217";
 
 const K = 0.5523; // constante da curva de Bézier que aproxima um quarto de círculo
 const rgb = (h: string): [number, number, number] =>
@@ -110,6 +111,7 @@ function roundedCorners(
  * Desenha o monograma "P" dobrado (fita de papel / papiro enrolado) dentro de uma caixa local 42×52,
  * posicionado em (ox, oy) com fator de escala `s`.
  * `main` = face frontal da fita (CREAM no fundo escuro; INK no fundo claro).
+ * Dobras triangulares em dourado (GOLD) e rolo interno em vermelho carmesim (RED / RED_DARK).
  */
 function drawFoldedP(
   c: DrawCanvas,
@@ -129,8 +131,7 @@ function drawFoldedP(
     return p;
   };
 
-  // 1. Face interna âmbar do rolo (curva traseira contínua do "P")
-  // Contorno externo direito contínuo de (38.8, 11.4) até (39.6, 23.6) sem degrau
+  // 1. Face interna vermelha do rolo (curva traseira contínua do "P")
   const curlBack = new mupdf.Path();
   curlBack.moveTo(px(26.2), py(11.4));
   curlBack.lineTo(px(38.8), py(11.4));
@@ -138,9 +139,9 @@ function drawFoldedP(
   curlBack.lineTo(px(26.6), py(26.4));
   curlBack.curveTo(px(29.0), py(22.0), px(28.8), py(15.6), px(26.2), py(11.4));
   curlBack.closePath();
-  c.fill(curlBack, AMBER_MID);
+  c.fill(curlBack, RED);
 
-  // Sombra superior suave sob a aba horizontal (mesmas tangentes esquerda/direita de curlBack)
+  // Sombra superior suave sob a aba horizontal
   const curlTopShade = new mupdf.Path();
   curlTopShade.moveTo(px(26.2), py(11.4));
   curlTopShade.lineTo(px(38.8), py(11.4));
@@ -148,9 +149,9 @@ function drawFoldedP(
   curlTopShade.curveTo(px(36.2), py(14.4), px(31.4), py(14.4), px(27.8), py(15.6));
   curlTopShade.curveTo(px(27.3), py(14.0), px(26.8), py(12.6), px(26.2), py(11.4));
   curlTopShade.closePath();
-  c.fill(curlTopShade, AMBER_DARK);
+  c.fill(curlTopShade, RED_DARK);
 
-  // Sombra inferior suave onde o rolo frontal se encaixa na curva âmbar
+  // Sombra inferior suave onde o rolo frontal se encaixa na curva vermelha
   const curlBotShade = new mupdf.Path();
   curlBotShade.moveTo(px(27.9), py(22.8));
   curlBotShade.curveTo(px(32.8), py(23.8), px(37.2), py(23.0), px(40.4), py(20.6));
@@ -158,9 +159,9 @@ function drawFoldedP(
   curlBotShade.lineTo(px(26.6), py(26.4));
   curlBotShade.curveTo(px(27.2), py(25.3), px(27.6), py(24.0), px(27.9), py(22.8));
   curlBotShade.closePath();
-  c.fill(curlBotShade, AMBER_DARK);
+  c.fill(curlBotShade, RED_DARK);
 
-  // 2. Miolo arredondado em âmbar do espiral do papiro (sem corte reto)
+  // 2. Miolo arredondado em vermelho carmesim do espiral do papiro
   const spiralCore = new mupdf.Path();
   spiralCore.moveTo(px(22.8), py(17.8));
   spiralCore.curveTo(px(19.6), py(17.8), px(18.0), py(20.4), px(19.0), py(23.2));
@@ -168,7 +169,7 @@ function drawFoldedP(
   spiralCore.curveTo(px(25.9), py(23.6), px(25.9), py(22.2), px(25.4), py(20.4));
   spiralCore.curveTo(px(25.0), py(18.8), px(24.2), py(17.8), px(22.8), py(17.8));
   spiralCore.closePath();
-  c.fill(spiralCore, AMBER);
+  c.fill(spiralCore, RED);
 
   // 3. Aba frontal enrolada (base da barriga do "P" fluindo sem quina até a tangente externa)
   const curlFront = new mupdf.Path();
@@ -183,7 +184,7 @@ function drawFoldedP(
   curlFront.closePath();
   c.fill(curlFront, main);
 
-  // 4. Barra superior horizontal com ombro arredondado contínuo até (38.8, 11.8)
+  // 4. Barra superior horizontal com ombro arredondado contínuo até (39.0, 11.8)
   const topBar = new mupdf.Path();
   topBar.moveTo(px(11.8), py(0.0));
   topBar.lineTo(px(25.2), py(0.0));
@@ -227,24 +228,24 @@ function drawFoldedP(
     );
   }
 
-  // 6. Dobra triangular superior-esquerda em âmbar
+  // 6. Dobra triangular superior-esquerda em dourado
   c.fill(
     poly([
       [0.0, 11.8],
       [11.8, 0.0],
       [11.8, 11.8],
     ]),
-    AMBER,
+    GOLD,
   );
 
-  // 7. Dobra triangular inferior-direita da haste em âmbar
+  // 7. Dobra triangular inferior-direita da haste em dourado
   c.fill(
     poly([
       [0.0, 52.0],
       [11.8, 40.2],
       [11.8, 52.0],
     ]),
-    AMBER,
+    GOLD,
   );
 }
 
@@ -252,7 +253,7 @@ function appIcon(size: number): mupdf.Pixmap {
   const c = canvas(size);
   c.fill(rounded(0, 0, 72, 72, 16), INK);
   // Contorno sutil: garante recorte limpo em barra de tarefas escura
-  c.stroke(rounded(1.1, 1.1, 69.8, 69.8, 15.0), EDGE, size <= 24 ? 2.6 : 1.9);
+  c.stroke(rounded(1.1, 1.1, 69.8, 69.8, 15.0), EDGE, size <= 24 ? 2.4 : 1.7);
 
   if (size <= 24) {
     // Em 16–24 px, amplia o monograma para máxima leitura sem detalhes frágeis
@@ -299,7 +300,7 @@ function fileIcon(size: number): mupdf.Pixmap {
     c.fill(foldShadow, CREAM_SHADE);
   }
 
-  // Dobra do canto superior direito em âmbar
+  // Dobra do canto superior direito em dourado
   const corner = new mupdf.Path();
   const cr = 2.4;
   const crk = cr * K;
@@ -310,19 +311,19 @@ function fileIcon(size: number): mupdf.Pixmap {
   corner.curveTo(fx, fy - cr + crk, fx + cr - crk, fy, fx + cr, fy);
   corner.lineTo(px + pw, fy);
   corner.closePath();
-  c.fill(corner, AMBER);
+  c.fill(corner, GOLD);
 
-  // Contorno da folha (contraste tanto no Explorer claro quanto no escuro)
-  c.stroke(page, EDGE, small ? 2.6 : 1.8, "Round", "Round");
+  // Contorno discreto da folha (contraste tanto no Explorer claro quanto no escuro)
+  c.stroke(page, PAGE_EDGE, small ? 2.2 : 1.4, "Round", "Round");
 
-  // 2. Monograma "P" dobrado no canto inferior direito da folha
+  // 2. Monograma "P" dobrado (carvão + dourado + vermelho) no canto inferior direito da folha
   if (small) {
     drawFoldedP(c, 32.0, 38.0, 0.54, INK, null);
   } else {
     drawFoldedP(c, 36.2, 37.2, 0.51, INK, null);
   }
 
-  // 3. Dobra traseira da etiqueta lateral (envoltório atrás da borda esquerda da folha)
+  // 3. Dobra traseira da etiqueta lateral (envoltório vermelho escuro atrás da borda esquerda)
   const tagX = small ? 5.5 : 7.0;
   const tagY = small ? 16.5 : 18.5;
   const tagW = small ? 42.0 : 38.5;
@@ -333,14 +334,14 @@ function fileIcon(size: number): mupdf.Pixmap {
   wrap.lineTo(px, tagY + tagH);
   wrap.lineTo(px, tagY + tagH + (small ? 5.5 : 7.0));
   wrap.closePath();
-  c.fill(wrap, AMBER_DARK);
+  c.fill(wrap, RED_DARK);
 
-  // 4. Etiqueta lateral âmbar "PDF" projetada à esquerda
-  c.fill(roundedCorners(tagX, tagY, tagW, tagH, 1.4, 2.8, 2.8, 0.6), AMBER);
+  // 4. Etiqueta lateral vermelha carmesim "PDF" projetada à esquerda
+  c.fill(roundedCorners(tagX, tagY, tagW, tagH, 1.4, 2.8, 2.8, 0.6), RED);
 
-  // Em tamanhos >= 32 px exibe "PDF"; nos menores (16–24 px) fica só a faixa âmbar limpa
+  // Em tamanhos >= 32 px exibe "PDF" em creme; nos menores (16–24 px) fica só a faixa vermelha limpa
   if (size >= 32) {
-    c.text("PDF", tagX + tagW / 2 + 0.3, tagY + 12.6, 11.4, INK, 0.65);
+    c.text("PDF", tagX + tagW / 2 + 0.3, tagY + 12.6, 11.4, CREAM, 0.65);
   }
 
   return c.done();
