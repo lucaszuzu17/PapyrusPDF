@@ -4,6 +4,7 @@ import {
   defaultOcrLang, localeTag, resolveLang, translate,
   type I18nKey, type LangPref, type UiLang,
 } from "../../shared/i18n.ts";
+import type { PrintJobOptions } from "../../shared/print-types.ts";
 import { disposeDoc, engine, engineAt, engineDoc, setEngineDoc, type CompareReport, type DocInfo, type OutlineNode, type SearchHit } from "./api.ts";
 import { prepareImages } from "./images.ts";
 import { tts } from "./tts.ts";
@@ -20,6 +21,7 @@ export type View = "read" | "organize";
 export type Layout = "single" | "double";
 /** Filtro visual da página para leitura confortável (não altera o PDF). */
 export type ReadMode = "normal" | "sepia" | "dark";
+export type ThemePref = "auto" | "light" | "dark";
 
 export interface OverlayImage {
   bytes: Uint8Array;
@@ -94,6 +96,14 @@ interface Ctx {
   systemLang: UiLang;
   setUiLang: (p: LangPref) => void;
   t: (key: I18nKey, vars?: Record<string, string | number>) => string;
+  theme: ThemePref;
+  setTheme: (th: ThemePref) => void;
+  fileMenuOpen: boolean;
+  setFileMenuOpen: (on: boolean) => void;
+  printOpen: boolean;
+  setPrintOpen: (on: boolean) => void;
+  homeOpen: boolean;
+  setHomeOpen: (on: boolean) => void;
   doc: OpenDoc | null;
   tabs: TabItem[];
   switchTab: (id: number) => void;
@@ -140,6 +150,7 @@ interface Ctx {
   newFromImages: (files?: InFile[]) => Promise<void>;
   insertImages: (files?: InFile[]) => Promise<void>;
   printDoc: () => Promise<void>;
+  executePrint: (opts: PrintJobOptions) => Promise<{ ok: boolean; reason?: string; pages: number } | undefined>;
   refresh: () => Promise<void>;
   rerender: () => void;
   undo: () => Promise<unknown>; redo: () => Promise<unknown>;
@@ -159,6 +170,7 @@ const LAYOUT_KEY = "papiro.layout";
 const READMODE_KEY = "papiro.readMode";
 const OCR_KEY = "papiro.ocrLang";
 const LANG_KEY = "papiro.uiLang";
+const THEME_KEY = "papiro.theme";
 const IMAGE_RE = /\.(png|jpe?g|bmp|gif|webp)$/i;
 const baseName = (name: string) => name.replace(/\.pdf$/i, "");
 const samePath = (a: string | null, b: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -202,6 +214,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const [doc, setDoc] = useState<OpenDoc | null>(null);
   const [tabs, setTabs] = useState<TabItem[]>([]);
+  const [theme, setThemeRaw] = useState<ThemePref>(() => {
+    const v = stored(THEME_KEY);
+    return v === "light" || v === "dark" ? v : "auto";
+  });
+  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const [printOpen, setPrintOpen] = useState(false);
+  const [homeOpen, setHomeOpen] = useState(false);
+  const setTheme = useCallback((th: ThemePref) => {
+    setThemeRaw(th);
+    store(THEME_KEY, th);
+  }, []);
+  useEffect(() => {
+    if (theme === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
   const [tool, setTool] = useState<Tool>("select");
   const [color, setColor] = useState<RGB>([1, 0.85, 0]);
   const [zoom, setZoomRaw] = useState(1);
@@ -352,6 +379,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   /** Mostra uma aba guardada (ou a que acabou de abrir). */
   const show = useCallback((s: TabSnap) => {
     setEngineDoc(s.doc.id);
+    setHomeOpen(false);
     setDoc(s.doc); setPage(s.page); setZoomRaw(s.zoom); setSearch(s.search);
     setScanned(s.scanned); setSelectedPages(s.selectedPages); setView(s.view);
     setGotoSignal((g) => ({ page: s.page, n: g.n + 1 }));
@@ -364,6 +392,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const switchTab = useCallback((id: number) => {
+    setHomeOpen(false);
     if (docRef.current?.id === id) return;
     if (occupied()) { notify(tRef.current("state.busySwitchTab")); return; }
     const s = snaps.current.get(id);
@@ -600,11 +629,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } catch { notify(tRef.current("state.dropReadErr")); }
   }, [openData, mergeFiles, insertImages, newFromImages, notify]);
 
+  const executePrint = useCallback(async (opts: PrintJobOptions) => {
+    if (!docRef.current) return undefined;
+    const id = engineDoc();
+    const r = await task(tRef.current("state.printing"), () => window.papiro.print(id, opts));
+    if (r && !r.ok && r.reason && !/cancel/i.test(r.reason)) notify(tRef.current("state.printErr", { reason: r.reason }));
+    return r;
+  }, [task, notify]);
+
   const printDoc = useCallback(async () => {
     if (!docRef.current) return;
-    const id = engineDoc();
-    const r = await task(tRef.current("state.printing"), () => window.papiro.print(id));
-    if (r && !r.ok && r.reason && !/cancel/i.test(r.reason)) notify(tRef.current("state.printErr", { reason: r.reason }));
+    if (await window.papiro.isE2e().catch(() => false)) {
+      const id = engineDoc();
+      const r = await task(tRef.current("state.printing"), () => window.papiro.print(id));
+      if (r && !r.ok && r.reason && !/cancel/i.test(r.reason)) notify(tRef.current("state.printErr", { reason: r.reason }));
+      return;
+    }
+    setFileMenuOpen(false);
+    setPrintOpen(true);
   }, [task, notify]);
 
   const undo = useCallback(() => mutate(tRef.current("state.undoing"), engine.undo), [mutate]);
@@ -747,20 +789,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Ctx>(() => ({
     uiLangPref, lang, systemLang, setUiLang, t,
+    theme, setTheme, fileMenuOpen, setFileMenuOpen, printOpen, setPrintOpen, homeOpen, setHomeOpen,
     doc, tabs, switchTab, closeTab, cycleTab, tool, setTool, color, setColor, zoom, setZoom, page, setPage, goTo, gotoSignal,
     view, setView, layout, setLayout, readMode, setReadMode, measureScale, setMeasureScale,
     overlayImg, setOverlayImg, compareReport, setCompareReport, fullscreen, toggleFullScreen,
     panel, setPanel, selectedPages, setSelectedPages, search, runSearch, stepSearch, signature, setSignature,
     stamp, setStamp, ocrLang, setOcrLang, ocrQuality, setOcrQuality, ocrCleanup, setOcrCleanup,
     recoveryItems, restoreRecovery, dismissRecovery, busy, toast, notify, progress, scanned, ocrProgress, dialog, closeDialog, ask, askForm,
-    openFile, openData, adoptFile, openDropped, save, mergeFiles, newFromImages, insertImages, printDoc, refresh, rerender,
+    openFile, openData, adoptFile, openDropped, save, mergeFiles, newFromImages, insertImages, printDoc, executePrint, refresh, rerender,
     undo, redo, mutate, task, runOcr, fitWidth, viewportWidth,
-  }), [uiLangPref, lang, systemLang, setUiLang, t, doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
+  }), [uiLangPref, lang, systemLang, setUiLang, t, theme, setTheme, fileMenuOpen, printOpen, homeOpen, doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
     readMode, measureScale, overlayImg, compareReport, fullscreen,
     toggleFullScreen, panel, selectedPages, search, runSearch, stepSearch, signature, stamp, ocrLang, ocrQuality, ocrCleanup,
     recoveryItems, restoreRecovery, dismissRecovery, busy, toast, notify,
     progress, scanned, ocrProgress, dialog, ask, askForm, openFile, openData, adoptFile, openDropped, save, mergeFiles,
-    newFromImages, insertImages, printDoc, refresh, rerender, undo, redo, mutate, task, runOcr, fitWidth]); // eslint-disable-line react-hooks/exhaustive-deps
+    newFromImages, insertImages, printDoc, executePrint, refresh, rerender, undo, redo, mutate, task, runOcr, fitWidth]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <C.Provider value={value}>{children}</C.Provider>;
 }

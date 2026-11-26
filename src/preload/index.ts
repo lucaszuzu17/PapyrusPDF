@@ -1,9 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { PrinterInfo, PrintJobOptions } from "../shared/print-types.ts";
 
 export interface FileData { path: string; name: string; bytes: Uint8Array }
 export interface Recent { path: string; name: string; page: number; when: number }
 export interface Progress { label: string; done: number; total: number }
 export interface RecoveryMeta { id: string; name: string; origPath: string | null; savedAt: number }
+export type { PrinterInfo, PrintJobOptions };
 
 const on = <T,>(channel: string, cb: (v: T) => void) => {
   const h = (_: unknown, v: T) => cb(v);
@@ -40,7 +42,11 @@ const api = {
   takePendingPath: (): Promise<string | null> => ipcRenderer.invoke("take-pending-path"),
   /** Caminho no disco de um arquivo arrastado para a janela ("" se não vier do disco). */
   pathForFile: (file: File): string => { try { return webUtils.getPathForFile(file); } catch { return ""; } },
-  print: (doc: number, pages?: number[]): Promise<{ ok: boolean; reason?: string; pages: number }> => ipcRenderer.invoke("print", doc, pages),
+  print: (doc: number, optsOrPages?: number[] | PrintJobOptions): Promise<{ ok: boolean; reason?: string; pages: number }> =>
+    ipcRenderer.invoke("print", doc, optsOrPages),
+  getPrinters: (): Promise<PrinterInfo[]> => ipcRenderer.invoke("get-printers"),
+  openDefaultApps: (): Promise<void> => ipcRenderer.invoke("open-default-apps"),
+  isE2e: (): Promise<boolean> => ipcRenderer.invoke("is-e2e"),
   recentList: (): Promise<Recent[]> => ipcRenderer.invoke("recent-list"),
   /** Registra o arquivo como recente e devolve a página em que ele estava da última vez. */
   recentAdd: (path: string): Promise<number> => ipcRenderer.invoke("recent-add", path),

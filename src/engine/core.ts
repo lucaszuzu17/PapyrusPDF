@@ -2165,21 +2165,28 @@ export class PdfEngine {
     return out;
   }
 
-  /** Página para impressão vetorial (SVG em pé; páginas deitadas giram 90°). Retorna null se exceder o limite seguro. */
-  printSvg(index: number, maxBytes = 8_000_000): string | null {
+  /** Página para impressão vetorial (SVG). Por padrão gira páginas deitadas 90° para caber em retrato; pode ser controlado via `opts`. */
+  printSvg(
+    index: number,
+    maxBytes = 8_000_000,
+    opts?: { autoRotate?: boolean; includeAnnots?: boolean },
+  ): string | null {
+    const autoRotate = opts?.autoRotate ?? true;
+    const includeAnnots = opts?.includeAnnots ?? true;
     const page = this.d().loadPage(index);
     const [x0, y0, x1, y1] = page.getBounds();
     const w = x1 - x0, h = y1 - y0;
-    const landscape = w > h;
-    const outW = landscape ? h : w;
-    const outH = landscape ? w : h;
+    const rotate = autoRotate && w > h;
+    const outW = rotate ? h : w;
+    const outH = rotate ? w : h;
     let m: mupdf.Matrix = mupdf.Matrix.translate(-x0, -y0);
-    if (landscape) m = mupdf.Matrix.concat(m, mupdf.Matrix.concat(mupdf.Matrix.rotate(90), mupdf.Matrix.translate(h, 0)));
+    if (rotate) m = mupdf.Matrix.concat(m, mupdf.Matrix.concat(mupdf.Matrix.rotate(90), mupdf.Matrix.translate(h, 0)));
     const buf = new mupdf.Buffer();
     const writer = new mupdf.DocumentWriter(buf, "svg", "");
     try {
       const dev = writer.beginPage([0, 0, outW, outH]);
-      page.run(dev, m);
+      if (includeAnnots) page.run(dev, m);
+      else page.runPageContents(dev, m);
       writer.endPage();
       writer.close();
       if (buf.getLength() > maxBytes) return null;
@@ -2192,13 +2199,20 @@ export class PdfEngine {
     }
   }
 
-  /** Página para impressão: PNG em pé (páginas deitadas são giradas 90° para aproveitar a folha). */
-  printImage(index: number, dpi: number): Uint8Array {
+  /** Página para impressão em PNG. Por padrão gira páginas deitadas 90°; pode ser controlado via `opts`. */
+  printImage(
+    index: number,
+    dpi: number,
+    opts?: { autoRotate?: boolean; includeAnnots?: boolean; grayscale?: boolean },
+  ): Uint8Array {
+    const autoRotate = opts?.autoRotate ?? true;
+    const includeAnnots = opts?.includeAnnots ?? true;
+    const cs = opts?.grayscale ? mupdf.ColorSpace.DeviceGray : mupdf.ColorSpace.DeviceRGB;
     const page = this.d().loadPage(index);
     const [x0, y0, x1, y1] = page.getBounds();
     let m = mupdf.Matrix.scale(dpi / 72, dpi / 72);
-    if (x1 - x0 > y1 - y0) m = mupdf.Matrix.concat(m, mupdf.Matrix.rotate(90));
-    const pix = page.toPixmap(m, mupdf.ColorSpace.DeviceRGB, false, true);
+    if (autoRotate && x1 - x0 > y1 - y0) m = mupdf.Matrix.concat(m, mupdf.Matrix.rotate(90));
+    const pix = page.toPixmap(m, cs, false, includeAnnots);
     const out = new Uint8Array(pix.asPNG());
     pix.destroy(); page.destroy();
     return out;

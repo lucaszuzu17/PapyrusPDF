@@ -7,6 +7,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import createEngineWorker from "./engine-worker.ts?nodeWorker";
 import { markdownToHtml } from "./markdown.ts";
 import { resolveLang, translate, type I18nKey, type LangPref, type UiLang } from "../shared/i18n.ts";
+import {
+  computeBookletSpreads, computeScalePct, computeTileGrid, multipleGrid, PAPER_MM, resolvePaperMm, resolvePrintPages,
+  type PrinterInfo, type PrintJobOptions,
+} from "../shared/print-types.ts";
 
 let uiLangPref: LangPref = "auto";
 const curLang = (): UiLang => resolveLang(uiLangPref, app.getLocale());
@@ -127,7 +131,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: "PapyrusPDF",
-    backgroundColor: "#1f2329",
+    backgroundColor: "#1e242b",
     show: false,
     webPreferences: {
       preload: join(here, "../preload/index.mjs"),
@@ -413,42 +417,238 @@ ipcMain.handle("recovery-clear", () => {
   return true;
 });
 
+// --- utilitários do sistema para a UI (impressoras, apps padrão, modo e2e) ---
+ipcMain.handle("is-e2e", () => !!(e2eScript && hooks.printTo));
+ipcMain.handle("open-default-apps", async () => {
+  if (process.platform === "win32") await shell.openExternal("ms-settings:defaultapps").catch(() => {});
+});
+ipcMain.handle("get-printers", async (): Promise<PrinterInfo[]> => {
+  try {
+    const wc = win?.webContents;
+    if (!wc) return [];
+    const list = await wc.getPrintersAsync();
+    return list.map((p) => ({
+      name: p.name,
+      displayName: p.displayName || p.name,
+      isDefault: Boolean((p as { isDefault?: boolean }).isDefault),
+      description: p.description || undefined,
+    }));
+  } catch {
+    return [];
+  }
+});
+
 // --- impressão ---
-// As páginas viram SVG vetorial (ou PNG para scans gigantes) numa janela oculta e o Chromium abre o diálogo de impressão.
+// As páginas viram SVG vetorial (ou PNG quando solicitado / em scans gigantes) numa janela oculta.
+// Suporta o diálogo estilo Foxit (escala, pôster lado a lado, múltiplas páginas por folha, livreto,
+// frente e verso, escala de cinza, intervalo, subconjunto, ordem inversa e seleção direta de impressora).
 const printDirs = new Set<string>(); // pastas temporárias de impressões em andamento
-ipcMain.handle("print", async (_e, doc: number, pages?: number[]) => {
+
+type PrintSheetInfo = { name: string; w: number; h: number; wMm: number; hMm: number; pageIndex: number; vector: boolean };
+
+function buildPrintHtml(sheets: PrintSheetInfo[], opts: PrintJobOptions): { html: string; landscape: boolean; pageSizeMicrons?: { width: number; height: number } } {
+  const grayCss = opts.grayscale ? "filter: grayscale(1);" : "";
+  const borderCss = opts.showBorder ? "outline: 0.35mm solid #333;" : "";
+  const first = sheets[0];
+  const firstPaper = resolvePaperMm(
+    opts.paperSize,
+    opts.handling === "booklet" ? "landscape" : opts.orientation,
+    opts.handling === "booklet" ? false : opts.autoRotate,
+    first?.wMm ?? 210,
+    first?.hMm ?? 297,
+    opts.handling === "scale" && opts.choosePaperByPdfSize,
+  );
+  const paperBase = PAPER_MM[opts.paperSize] ?? PAPER_MM.A4;
+  const pageSizeMicrons = (opts.handling === "scale" && opts.choosePaperByPdfSize && first)
+    ? { width: Math.round(Math.min(first.wMm, first.hMm) * 1000), height: Math.round(Math.max(first.wMm, first.hMm) * 1000) }
+    : { width: Math.round(paperBase.w * 1000), height: Math.round(paperBase.h * 1000) };
+
+  const blocks: string[] = [];
+
+  if (opts.handling === "scale") {
+    for (const s of sheets) {
+      const paper = resolvePaperMm(opts.paperSize, opts.orientation, opts.autoRotate, s.wMm, s.hMm, opts.choosePaperByPdfSize);
+      const pct = computeScalePct(s.wMm, s.hMm, paper.w, paper.h, opts.scaleMode, opts.customScale, 5);
+      const drawW = (s.wMm * pct) / 100;
+      const drawH = (s.hMm * pct) / 100;
+      const align = opts.autoCenter ? "align-items:center;justify-content:center;" : "align-items:flex-start;justify-content:flex-start;";
+      blocks.push(
+        `<div class="sheet" style="width:${paper.w.toFixed(2)}mm;height:${paper.h.toFixed(2)}mm;${align}">` +
+        `<img src="${s.name}" style="width:${drawW.toFixed(2)}mm;height:${drawH.toFixed(2)}mm;${grayCss}${borderCss}">` +
+        `</div>`,
+      );
+    }
+  } else if (opts.handling === "poster") {
+    const marginMm = 6;
+    for (const s of sheets) {
+      const paper = resolvePaperMm(opts.paperSize, opts.orientation, opts.autoRotate, s.wMm, s.hMm, false);
+      const grid = computeTileGrid(s.wMm, s.hMm, paper.w, paper.h, opts.tileScale, opts.tileOverlapMm, marginMm);
+      for (let r = 0; r < grid.rows; r++) {
+        for (let c = 0; c < grid.cols; c++) {
+          const offX = c * grid.stepX;
+          const offY = r * grid.stepY;
+          const marks = opts.tileCutMarks
+            ? `<div class="cut tl"></div><div class="cut tr"></div><div class="cut bl"></div><div class="cut br"></div>`
+            : "";
+          blocks.push(
+            `<div class="sheet" style="width:${paper.w.toFixed(2)}mm;height:${paper.h.toFixed(2)}mm;align-items:center;justify-content:center;">` +
+            `<div class="tile-clip" style="width:${grid.tileW.toFixed(2)}mm;height:${grid.tileH.toFixed(2)}mm;">` +
+            `<img src="${s.name}" style="position:absolute;left:${(-offX).toFixed(2)}mm;top:${(-offY).toFixed(2)}mm;width:${grid.scaledW.toFixed(2)}mm;height:${grid.scaledH.toFixed(2)}mm;max-width:none;max-height:none;${grayCss}">` +
+            `${marks}</div></div>`,
+          );
+        }
+      }
+    }
+  } else if (opts.handling === "multiple") {
+    const paper = firstPaper;
+    const { cols, rows } = multipleGrid(opts.pagesPerSheet, paper.landscape);
+    const per = cols * rows;
+    const cellBorder = opts.multipleBorder || opts.showBorder ? "border:0.25mm solid #666;" : "";
+    for (let start = 0; start < sheets.length; start += per) {
+      const chunk = sheets.slice(start, start + per);
+      const ordered: (PrintSheetInfo | null)[] = Array(per).fill(null);
+      chunk.forEach((item, idx) => {
+        if (opts.multipleOrder === "horizontal") ordered[idx] = item;
+        else if (opts.multipleOrder === "horizontalRev") {
+          const row = Math.floor(idx / cols), col = cols - 1 - (idx % cols);
+          ordered[row * cols + col] = item;
+        } else {
+          const col = Math.floor(idx / rows), row = idx % rows;
+          ordered[row * cols + col] = item;
+        }
+      });
+      const cells = ordered.map((item) =>
+        `<div class="nup-cell" style="${cellBorder}">${item ? `<img src="${item.name}" style="max-width:100%;max-height:100%;object-fit:contain;${grayCss}">` : ""}</div>`,
+      ).join("");
+      blocks.push(
+        `<div class="sheet nup-sheet" style="width:${paper.w.toFixed(2)}mm;height:${paper.h.toFixed(2)}mm;grid-template-columns:repeat(${cols},1fr);grid-template-rows:repeat(${rows},1fr);">${cells}</div>`,
+      );
+    }
+  } else {
+    // Livreto (2 páginas por folha em paisagem)
+    const paper = firstPaper;
+    const map = new Map<number, PrintSheetInfo>();
+    sheets.forEach((s) => map.set(s.pageIndex, s));
+    const spreads = computeBookletSpreads(sheets.map((s) => s.pageIndex), opts.bookletBinding, opts.bookletSubset);
+    const cellBorder = opts.showBorder ? "border:0.25mm solid #666;" : "";
+    for (const [lIdx, rIdx] of spreads) {
+      const l = lIdx !== null ? map.get(lIdx) : undefined;
+      const r = rIdx !== null ? map.get(rIdx) : undefined;
+      blocks.push(
+        `<div class="sheet nup-sheet" style="width:${paper.w.toFixed(2)}mm;height:${paper.h.toFixed(2)}mm;grid-template-columns:1fr 1fr;grid-template-rows:1fr;">` +
+        `<div class="nup-cell" style="${cellBorder}">${l ? `<img src="${l.name}" style="max-width:100%;max-height:100%;object-fit:contain;${grayCss}">` : ""}</div>` +
+        `<div class="nup-cell" style="${cellBorder}">${r ? `<img src="${r.name}" style="max-width:100%;max-height:100%;object-fit:contain;${grayCss}">` : ""}</div>` +
+        `</div>`,
+      );
+    }
+  }
+
+  const pageRule = `@page { size: ${firstPaper.w.toFixed(2)}mm ${firstPaper.h.toFixed(2)}mm; margin: 0; }`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>PapyrusPDF</title><style>
+${pageRule}
+html, body { margin: 0; padding: 0; background: #fff; }
+.sheet { position: relative; display: flex; overflow: hidden; box-sizing: border-box; break-after: page; break-inside: avoid; }
+.sheet:last-child { break-after: auto; }
+.sheet img { display: block; flex: none; }
+.tile-clip { position: relative; overflow: hidden; box-sizing: border-box; }
+.cut { position: absolute; width: 4mm; height: 4mm; pointer-events: none; }
+.cut.tl { left: 0; top: 0; border-left: 0.3mm solid #111; border-top: 0.3mm solid #111; }
+.cut.tr { right: 0; top: 0; border-right: 0.3mm solid #111; border-top: 0.3mm solid #111; }
+.cut.bl { left: 0; bottom: 0; border-left: 0.3mm solid #111; border-bottom: 0.3mm solid #111; }
+.cut.br { right: 0; bottom: 0; border-right: 0.3mm solid #111; border-bottom: 0.3mm solid #111; }
+.nup-sheet { display: grid; gap: 3mm; padding: 5mm; }
+.nup-cell { display: flex; align-items: center; justify-content: center; overflow: hidden; box-sizing: border-box; min-width: 0; min-height: 0; }
+</style></head><body>${blocks.join("")}</body></html>`;
+  return { html, landscape: firstPaper.landscape, pageSizeMicrons };
+}
+
+ipcMain.handle("print", async (_e, doc: number, optsOrPages?: number[] | PrintJobOptions) => {
   const dir = await mkdtemp(join(tmpdir(), "papiro-print-"));
   printDirs.add(dir);
   let pw: BrowserWindow | null = null;
   try {
-    const total = pages?.length ?? ((await callEngine("info", [], doc)) as { pageCount: number }).pageCount;
-    const dpi = total > 80 ? 150 : 200;
-    const sheets = (await callEngine("printFiles", [dir, dpi, pages], doc)) as { name: string; w: number; h: number; vector?: boolean }[];
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>PapyrusPDF</title><style>
+    const isRich = !!optsOrPages && !Array.isArray(optsOrPages);
+    const info = (await callEngine("info", [], doc)) as { pageCount: number };
+
+    if (!isRich) {
+      // Caminho legado / E2E (array opcional de páginas → diálogo nativo ou hooks.printTo)
+      const pages = optsOrPages as number[] | undefined;
+      const total = pages?.length ?? info.pageCount;
+      const dpi = total > 80 ? 150 : 200;
+      const sheets = (await callEngine("printFiles", [dir, dpi, pages], doc)) as PrintSheetInfo[];
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>PapyrusPDF</title><style>
 html, body { height: 100%; margin: 0; padding: 0; background: #fff; }
 .p { height: 100%; width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; break-after: page; break-inside: avoid; }
 .p:last-child { break-after: auto; }
 img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
 </style></head><body>${sheets.map((s) =>
-      // tamanho real da página; SVG preserva vetores e texto nítidos na impressora
-      `<div class="p"><img src="${s.name}" style="width:${s.w.toFixed(3)}in;height:${s.h.toFixed(3)}in"></div>`).join("")}</body></html>`;
+        `<div class="p"><img src="${s.name}" style="width:${s.w.toFixed(3)}in;height:${s.h.toFixed(3)}in"></div>`).join("")}</body></html>`;
+      await writeFile(join(dir, "index.html"), html);
+      pw = new BrowserWindow({ show: false, parent: win ?? undefined, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+      await pw.loadFile(join(dir, "index.html"));
+      if (e2eScript && hooks.printTo) {
+        const m = 0.2;
+        const pdf = await pw.webContents.printToPDF({ pageSize: "A4", printBackground: true, margins: { top: m, bottom: m, left: m, right: m } });
+        await writeFile(hooks.printTo, pdf);
+        return { ok: true, pages: sheets.length };
+      }
+      const r = await new Promise<{ ok: boolean; reason?: string }>((done) =>
+        pw!.webContents.print({ silent: false, printBackground: true, margins: { marginType: "printableArea" } },
+          (ok, reason) => done({ ok, reason })));
+      return { ...r, pages: sheets.length };
+    }
+
+    // Caminho completo do diálogo de impressão estilo Foxit
+    const opts = optsOrPages as PrintJobOptions;
+    const pages = resolvePrintPages(opts, info.pageCount);
+    if (!pages.length) return { ok: false, reason: "no-pages", pages: 0 };
+    const dpi = opts.printAsImage ? (pages.length > 60 ? 200 : 300) : (pages.length > 80 ? 150 : 200);
+    const sheets = (await callEngine(
+      "printFiles",
+      [dir, dpi, pages, {
+        forceImage: opts.printAsImage,
+        autoRotate: false,
+        includeAnnots: opts.printWhat !== "docOnly",
+        grayscale: opts.grayscale,
+      }],
+      doc,
+    )) as PrintSheetInfo[];
+
+    const { html, landscape, pageSizeMicrons } = buildPrintHtml(sheets, opts);
     await writeFile(join(dir, "index.html"), html);
-    // filha da janela principal: fechar o Papiro encerra a impressão, em vez de deixar um processo invisível
     pw = new BrowserWindow({ show: false, parent: win ?? undefined, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
     await pw.loadFile(join(dir, "index.html"));
+
     if (e2eScript && hooks.printTo) {
-      const m = 0.2; // polegadas, parecido com a área imprimível de uma impressora comum
-      const pdf = await pw.webContents.printToPDF({ pageSize: "A4", printBackground: true, margins: { top: m, bottom: m, left: m, right: m } });
+      const pdf = await pw.webContents.printToPDF({
+        pageSize: opts.paperSize,
+        landscape,
+        printBackground: true,
+        margins: { top: 0, bottom: 0, left: 0, right: 0 },
+      });
       await writeFile(hooks.printTo, pdf);
       return { ok: true, pages: sheets.length };
     }
+
+    const duplexMode = opts.duplex ? (opts.duplexEdge === "short" ? "shortEdge" : "longEdge") : "simplex";
     const r = await new Promise<{ ok: boolean; reason?: string }>((done) =>
-      pw!.webContents.print({ silent: false, printBackground: true, margins: { marginType: "printableArea" } },
-        (ok, reason) => done({ ok, reason })));
+      pw!.webContents.print(
+        {
+          silent: !opts.systemDialog,
+          deviceName: opts.printer || undefined,
+          copies: Math.max(1, Math.min(99, Math.round(opts.copies || 1))),
+          collate: !!opts.collate,
+          color: !opts.grayscale,
+          duplexMode,
+          landscape,
+          pageSize: pageSizeMicrons,
+          printBackground: true,
+          margins: { marginType: "none" },
+        },
+        (ok, reason) => done({ ok, reason }),
+      ));
     return { ...r, pages: sheets.length };
   } finally {
-    // quando o retorno chega o trabalho já foi entregue ao Windows: as imagens das páginas
-    // (que podem ser de um documento protegido) saem do disco na hora
     if (pw && !pw.isDestroyed()) pw.destroy();
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
     printDirs.delete(dir);

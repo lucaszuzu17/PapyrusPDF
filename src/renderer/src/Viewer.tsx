@@ -1,6 +1,8 @@
-// Leitor em rolagem contínua, com renderização só das páginas visíveis.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+// Leitor em rolagem contínua, com renderização só das páginas visíveis + Tela Inicial estilo Foxit.
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { localeTag } from "../../shared/i18n.ts";
+import { PapyrusLogo, PdfFileBadge } from "./BrandMark.tsx";
+import * as feat from "./features.ts";
 import { Icon } from "./icons.tsx";
 import { PageView } from "./PageView.tsx";
 import { useApp } from "./state.tsx";
@@ -130,48 +132,195 @@ export function Viewer() {
 
 type RecentItem = Awaited<ReturnType<typeof window.papiro.recentList>>[number];
 
-function Welcome() {
+export function Welcome() {
   const app = useApp();
   const [recent, setRecent] = useState<RecentItem[]>([]);
+  const [filter, setFilter] = useState("");
+  const [mode, setMode] = useState<"list" | "grid">("list");
+
   useEffect(() => { window.papiro.recentList().then(setRecent).catch(() => {}); }, []);
-  const when = (ts: number) => {
-    const days = Math.floor((new Date().setHours(0, 0, 0, 0) - new Date(ts).setHours(0, 0, 0, 0)) / 86_400_000);
-    return days <= 0 ? app.t("welcome.today")
-      : days === 1 ? app.t("welcome.yesterday")
-      : days < 7 ? app.t("welcome.daysAgo", { n: days })
-      : new Date(ts).toLocaleDateString(localeTag(app.lang));
+
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return q ? recent.filter((r) => r.name.toLowerCase().includes(q) || r.path.toLowerCase().includes(q)) : recent;
+  }, [recent, filter]);
+
+  const fmtDate = (ts: number) => {
+    const d = new Date(ts);
+    return `${d.toLocaleDateString(localeTag(app.lang))} ${d.toLocaleTimeString(localeTag(app.lang), { hour: "2-digit", minute: "2-digit" })}`;
   };
+
+  const editPdfNow = async () => {
+    await app.openFile();
+    app.setTool("edittext");
+  };
+
   return (
-    <div className="welcome">
-      <h1>PapyrusPDF</h1>
-      <p>{app.t("welcome.subtitle")}</p>
-      <div className="welcome-actions">
-        <button className="primary" onClick={() => app.openFile()}>{app.t("welcome.openBtn")}</button>
-        <button onClick={() => app.mergeFiles()}>{app.t("welcome.mergeBtn")}</button>
-        <button onClick={() => app.newFromImages()}>{app.t("welcome.imagesBtn")}</button>
-      </div>
-      <p className="hint">{app.t("welcome.hint")}</p>
-      {recent.length > 0 && (
-        <section className="recent" aria-label={app.t("welcome.recentAria")}>
-          <header>
-            <h2><Icon name="clock" size={15} /> {app.t("welcome.recentTitle")}</h2>
-            <button onClick={() => window.papiro.recentClear().then(setRecent)}>{app.t("welcome.clearList")}</button>
+    <div className="home-screen">
+      {/* Rail lateral estilo Foxit */}
+      <aside className="home-rail">
+        <div className="home-brand-card">
+          <PapyrusLogo size={34} />
+          <div>
+            <b>PapyrusPDF</b>
+            <small>100% Offline</small>
+          </div>
+        </div>
+        <button type="button" className="home-nav-item on">
+          <Icon name="home" size={16} /> {app.t("home.navHome")}
+        </button>
+        <button type="button" className="home-open-btn" onClick={() => app.openFile()}>
+          <Icon name="open" size={16} /> {app.t("home.openFile")}
+        </button>
+        <button type="button" className="home-sec-btn" onClick={() => app.setFileMenuOpen(true)}>
+          <Icon name="sun" size={15} /> {app.t("file.appearance")}
+        </button>
+        <div className="grow" />
+        <p className="home-rail-hint">{app.t("welcome.hint")}</p>
+      </aside>
+
+      {/* Área principal estilo Foxit: Assistente de Ferramentas + Recentes */}
+      <div className="home-main">
+        <section className="home-tools">
+          <header className="home-sec-head">
+            <h2>{app.t("home.toolsHeading")}</h2>
+            <span>({app.t("home.toolsSub")})</span>
           </header>
-          <ul>
-            {recent.map((r) => (
-              <li key={r.path}>
-                <button className="ritem" title={r.path} onClick={() => app.openFile(r.path)}>
-                  <b>{r.name}</b>
-                  <small>{r.path.replace(/[\\/][^\\/]*$/, "")}</small>
-                  <span>{when(r.when)}{r.page > 0 ? app.t("welcome.pageTag", { n: r.page + 1 }) : ""}</span>
-                </button>
-                <button className="rdel" title={app.t("welcome.removeTip")} aria-label={app.t("welcome.removeAria", { name: r.name })}
-                  onClick={() => window.papiro.recentRemove(r.path).then(setRecent)}><Icon name="close" size={14} /></button>
-              </li>
-            ))}
-          </ul>
+
+          <div className="home-tools-row">
+            <div className="tool-card" onClick={editPdfNow} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") editPdfNow(); }}>
+              <span className="tc-icon red"><Icon name="editText" size={22} /></span>
+              <div className="tc-body">
+                <b>{app.t("home.toolEdit")}</b>
+                <p>{app.t("home.toolEditDesc")}</p>
+                <span className="tc-link">{app.t("home.useNow")}</span>
+              </div>
+            </div>
+
+            <div className="tool-card" onClick={() => app.mergeFiles()} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") app.mergeFiles(); }}>
+              <span className="tc-icon gold"><Icon name="merge" size={22} /></span>
+              <div className="tc-body">
+                <b>{app.t("home.toolMerge")}</b>
+                <p>{app.t("home.toolMergeDesc")}</p>
+                <span className="tc-link">{app.t("home.useNow")}</span>
+              </div>
+            </div>
+
+            <div className="tool-card" onClick={() => app.newFromImages()} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") app.newFromImages(); }}>
+              <span className="tc-icon ink"><Icon name="image" size={22} /></span>
+              <div className="tc-body">
+                <b>{app.t("home.toolImages")}</b>
+                <p>{app.t("home.toolImagesDesc")}</p>
+                <span className="tc-link">{app.t("home.useNow")}</span>
+              </div>
+            </div>
+
+            <div className="tool-card" onClick={() => feat.batchProcess(app)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") feat.batchProcess(app); }}>
+              <span className="tc-icon cream"><Icon name="batch" size={22} /></span>
+              <div className="tc-body">
+                <b>{app.t("home.toolBatch")}</b>
+                <p>{app.t("home.toolBatchDesc")}</p>
+                <span className="tc-link">{app.t("home.useNow")}</span>
+              </div>
+            </div>
+
+            <div className="default-card">
+              <b>{app.t("home.defaultTitle")}</b>
+              <button type="button" className="default-btn" onClick={() => window.papiro.openDefaultApps()}>
+                {app.t("home.defaultBtn")}
+              </button>
+            </div>
+          </div>
         </section>
-      )}
+
+        <section className="home-recents" aria-label={app.t("welcome.recentAria")}>
+          <header className="home-rec-head">
+            <h2>{app.t("welcome.recentTitle")}</h2>
+            <div className="home-rec-tools">
+              <input
+                type="search"
+                className="home-rec-filter"
+                value={filter}
+                placeholder={app.t("home.recentSearch")}
+                onChange={(e) => setFilter(e.target.value)}
+              />
+              <button type="button" className={mode === "list" ? "on" : ""} title={app.t("home.viewList")} onClick={() => setMode("list")}>
+                <Icon name="list" size={16} />
+              </button>
+              <button type="button" className={mode === "grid" ? "on" : ""} title={app.t("home.viewGrid")} onClick={() => setMode("grid")}>
+                <Icon name="grid" size={16} />
+              </button>
+              {recent.length > 0 && (
+                <button type="button" title={app.t("welcome.clearList")} onClick={() => window.papiro.recentClear().then(setRecent)}>
+                  <Icon name="trash" size={16} />
+                </button>
+              )}
+            </div>
+          </header>
+
+          {filtered.length === 0 ? (
+            <div className="home-rec-empty">
+              <PdfFileBadge size={42} />
+              <p>{app.t("file.noRecent")}</p>
+              <button type="button" className="primary" onClick={() => app.openFile()}>{app.t("welcome.openBtn")}</button>
+            </div>
+          ) : mode === "list" ? (
+            <div className="home-rec-table">
+              <div className="hrt-head">
+                <span>{app.t("home.colName")}</span>
+                <span>{app.t("home.colDate")}</span>
+              </div>
+              <ul>
+                {filtered.map((r) => (
+                  <li key={r.path}>
+                    <button type="button" className="hrt-row" title={r.path} onClick={() => app.openFile(r.path)}>
+                      <PdfFileBadge size={26} />
+                      <div className="hrt-name">
+                        <b>{r.name}</b>
+                        <small>{r.path}</small>
+                      </div>
+                      <span className="hrt-date">
+                        {fmtDate(r.when)}
+                        {r.page > 0 && <em>{app.t("welcome.pageTag", { n: r.page + 1 })}</em>}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="rdel"
+                      title={app.t("welcome.removeTip")}
+                      aria-label={app.t("welcome.removeAria", { name: r.name })}
+                      onClick={() => window.papiro.recentRemove(r.path).then(setRecent)}
+                    >
+                      <Icon name="close" size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="home-rec-grid">
+              {filtered.map((r) => (
+                <div key={r.path} className="hrg-card">
+                  <button type="button" className="hrg-open" title={r.path} onClick={() => app.openFile(r.path)}>
+                    <PdfFileBadge size={40} />
+                    <b>{r.name}</b>
+                    <small>{fmtDate(r.when)}</small>
+                  </button>
+                  <button
+                    type="button"
+                    className="rdel"
+                    title={app.t("welcome.removeTip")}
+                    aria-label={app.t("welcome.removeAria", { name: r.name })}
+                    onClick={() => window.papiro.recentRemove(r.path).then(setRecent)}
+                  >
+                    <Icon name="close" size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

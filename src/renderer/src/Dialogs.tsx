@@ -1,10 +1,12 @@
-// Caixas de diálogo: texto, senha, confirmação, formulário, assinatura e comparação de PDFs.
+// Caixas de diálogo: texto, senha, confirmação, formulário, assinatura, impressão e comparação de PDFs.
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CompareReport } from "./api.ts";
+import { PrintDialog } from "./PrintDialog.tsx";
 import { useApp, type FormValues } from "./state.tsx";
 
 export function Dialogs() {
-  const { dialog, closeDialog, compareReport, setCompareReport } = useApp();
+  const { dialog, closeDialog, compareReport, setCompareReport, printOpen, setPrintOpen, doc } = useApp();
+  if (printOpen && doc) return <PrintDialog onClose={() => setPrintOpen(false)} />;
   if (compareReport) return <CompareModal report={compareReport} onClose={() => setCompareReport(null)} />;
   if (!dialog) return null;
   return (

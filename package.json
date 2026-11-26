@@ -25,7 +25,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test test/engine.test.ts test/features.test.ts test/review.test.ts test/pacote-a.test.ts test/protecao.test.ts test/text-editing.test.ts test/new-features.test.ts test/tier1.test.ts test/tier2.test.ts test/i18n.test.ts test/ocr-neural.test.ts",
+    "test": "node --test test/engine.test.ts test/features.test.ts test/review.test.ts test/pacote-a.test.ts test/protecao.test.ts test/text-editing.test.ts test/new-features.test.ts test/tier1.test.ts test/tier2.test.ts test/i18n.test.ts test/print.test.ts test/ocr-neural.test.ts",
     "fixtures": "node test/fixtures.ts",
     "e2e": "electron-vite build && node test/run-e2e.mjs",
     "icon": "node build/make-icon.ts",

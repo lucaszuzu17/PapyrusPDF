@@ -106,29 +106,43 @@ const special: Record<string, (this: PdfEngine, ...a: any[]) => unknown> = {
   },
   /**
    * Prepara cada página para impressão: prefere SVG vetorial nítido (texto e linhas sem pixelização)
-   * e recorre a PNG em alta resolução apenas para páginas rasterizadas muito pesadas.
+   * e recorre a PNG em alta resolução para páginas rasterizadas muito pesadas ou quando `forceImage` está ativo.
    */
-  printFiles(dir: string, dpi: number, pages?: number[]) {
+  printFiles(
+    dir: string,
+    dpi: number,
+    pages?: number[],
+    opts?: { forceImage?: boolean; autoRotate?: boolean; includeAnnots?: boolean; grayscale?: boolean },
+  ) {
     const info = this.info();
     const list = pages ?? Array.from({ length: info.pageCount }, (_, i) => i);
-    const out: { name: string; w: number; h: number; vector: boolean }[] = [];
+    const autoRotate = opts?.autoRotate ?? true;
+    const includeAnnots = opts?.includeAnnots ?? true;
+    const forceImage = !!opts?.forceImage;
+    const grayscale = !!opts?.grayscale;
+    const out: { name: string; w: number; h: number; wMm: number; hMm: number; pageIndex: number; vector: boolean }[] = [];
     list.forEach((index, k) => {
-      progress("Preparando impressão vetorial", k, list.length);
+      progress("Preparando impressão", k, list.length);
       const p = info.pages[index];
-      const short = Math.min(p.width, p.height) / 72, long = Math.max(p.width, p.height) / 72;
-      const svg = this.printSvg(index);
+      const rotate = autoRotate && p.width > p.height;
+      const effWpt = rotate ? p.height : p.width;
+      const effHpt = rotate ? p.width : p.height;
+      const wIn = effWpt / 72;
+      const hIn = effHpt / 72;
+      const svg = forceImage ? null : this.printSvg(index, 8_000_000, { autoRotate, includeAnnots });
       if (svg) {
         const name = `p${String(k + 1).padStart(5, "0")}.svg`;
         writeFileSync(join(dir, name), svg, "utf8");
-        out.push({ name, w: short, h: long, vector: true });
+        out.push({ name, w: wIn, h: hIn, wMm: (effWpt * 25.4) / 72, hMm: (effHpt * 25.4) / 72, pageIndex: index, vector: true });
       } else {
-        const eff = Math.min(dpi, 3500 / long);
+        const longIn = Math.max(wIn, hIn);
+        const eff = Math.min(dpi, 3500 / Math.max(1, longIn));
         const name = `p${String(k + 1).padStart(5, "0")}.png`;
-        writeFileSync(join(dir, name), this.printImage(index, eff));
-        out.push({ name, w: short, h: long, vector: false });
+        writeFileSync(join(dir, name), this.printImage(index, eff, { autoRotate, includeAnnots, grayscale }));
+        out.push({ name, w: wIn, h: hIn, wMm: (effWpt * 25.4) / 72, hMm: (effHpt * 25.4) / 72, pageIndex: index, vector: false });
       }
     });
-    progress("Preparando impressão vetorial", list.length, list.length);
+    progress("Preparando impressão", list.length, list.length);
     return out;
   },
   /** Grava páginas como imagens em `dir`. Devolve os caminhos gravados. */

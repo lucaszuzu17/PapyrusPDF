@@ -1,7 +1,8 @@
-// Faixa de opções declarativa: abas → grupos → comandos.
+// Faixa de opções estilo Foxit (nas cores do ícone PapyrusPDF): Arquivo (Backstage) + QAT + Abas → Grupos → Comandos.
 import { useEffect, useState } from "react";
 import type { I18nKey, LangPref } from "../../shared/i18n.ts";
 import { engine } from "./api.ts";
+import { PapyrusLogo } from "./BrandMark.tsx";
 import * as feat from "./features.ts";
 import { Icon } from "./icons.tsx";
 import { ocrLangOptions, useApp, type RGB, type Tool } from "./state.tsx";
@@ -188,6 +189,34 @@ const TABS: Tab[] = [
     ],
   },
   {
+    id: "view", labelKey: "tab.view", groups: [
+      { labelKey: "grp.viewLayout", cmds: [
+        { id: "vOne", labelKey: "app.onePage", icon: "onePage", needsDoc: true, on: (a) => a.layout === "single",
+          run: (a) => a.setLayout("single") },
+        { id: "vTwo", labelKey: "cmd.two", icon: "twoPages", needsDoc: true, on: (a) => a.layout === "double",
+          run: (a) => a.setLayout("double"), titleKey: "cmd.two.tip" },
+        { id: "vFull", labelKey: "cmd.full", icon: "fullscreen", needsDoc: true, run: (a) => a.toggleFullScreen(true), titleKey: "cmd.full.tip" },
+      ] },
+      { labelKey: "grp.viewZoom", cmds: [
+        { id: "vZOut", labelKey: "cmd.zoomOut", icon: "zoomOut", needsDoc: true, run: (a) => a.setZoom((z) => z / 1.2) },
+        { id: "vZIn", labelKey: "cmd.zoomIn", icon: "zoomIn", needsDoc: true, run: (a) => a.setZoom((z) => z * 1.2) },
+        { id: "vFit", labelKey: "cmd.fit", icon: "fitWidth", needsDoc: true, run: (a) => a.fitWidth() },
+      ] },
+      { labelKey: "grp.viewRead", cmds: [
+        { id: "vRead", labelKey: "cmd.readMode", icon: "readMode", needsDoc: true, on: (a) => a.readMode !== "normal",
+          run: feat.cycleReadMode, titleKey: "cmd.readMode.tip" },
+        { id: "vTts", labelKey: "cmd.tts", icon: "speak", needsDoc: true, on: () => tts.snapshot().active,
+          run: (a) => {
+            if (tts.snapshot().active) tts.stop();
+            else tts.start(a.page, a.doc!.info.pageCount, a.goTo, a.lang);
+          }, titleKey: "cmd.tts.tip" },
+      ] },
+      { labelKey: "grp.viewCompare", cmds: [
+        { id: "vCmp", labelKey: "cmd.compare", icon: "compare", needsDoc: true, run: feat.comparePdf, titleKey: "cmd.compare.tip" },
+      ] },
+    ],
+  },
+  {
     id: "fill", labelKey: "tab.fill", groups: [
       { labelKey: "grp.signature", cmds: [
         { id: "sig", labelKey: "cmd.sig", icon: "sign", tool: "signature", needsDoc: true, titleKey: "cmd.sig.tip" },
@@ -252,77 +281,138 @@ const css = (c: RGB) => `rgb(${c.map((v) => Math.round(v * 255)).join(",")})`;
 export function Ribbon() {
   const a = useApp();
   const [tab, setTab] = useState("home");
+  const [collapsed, setCollapsed] = useState(false);
   const [, setTtsTick] = useState<TtsState>(() => tts.snapshot());
   useEffect(() => tts.subscribe(setTtsTick), []);
   const active = TABS.find((x) => x.id === tab)!;
   const ocrOpts = ocrLangOptions(a.lang);
   const sysLangLabel = a.systemLang.toUpperCase();
+  const nextTheme = () => {
+    const order: ("auto" | "light" | "dark")[] = ["auto", "light", "dark"];
+    a.setTheme(order[(order.indexOf(a.theme) + 1) % order.length]);
+  };
   return (
-    <header className="ribbon">
+    <header className={collapsed ? "ribbon collapsed" : "ribbon"}>
       <nav className="ribbon-tabs" role="tablist">
-        <span className="brand">PapyrusPDF</span>
+        <div className="ribbon-brand-qat">
+          <button type="button" className="brand-btn" title="PapyrusPDF" onClick={() => a.setHomeOpen(true)}>
+            <PapyrusLogo size={20} />
+            <span className="brand">PapyrusPDF</span>
+          </button>
+          <div className="qat" aria-label="Acesso rápido">
+            <button type="button" title={a.t("cmd.save.tip")} disabled={!a.doc || !!a.busy} onClick={() => a.save()}>
+              <Icon name="save" size={14} />
+            </button>
+            <button type="button" title={a.t("cmd.undo.tip")} disabled={!a.doc?.info.canUndo || !!a.busy} onClick={() => a.undo()}>
+              <Icon name="undo" size={14} />
+            </button>
+            <button type="button" title={a.t("cmd.redo.tip")} disabled={!a.doc?.info.canRedo || !!a.busy} onClick={() => a.redo()}>
+              <Icon name="redo" size={14} />
+            </button>
+            <button type="button" title={a.t("cmd.print.tip")} disabled={!a.doc || !!a.busy} onClick={() => a.printDoc()}>
+              <Icon name="print" size={14} />
+            </button>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className={a.fileMenuOpen ? "file-tab on" : "file-tab"}
+          onClick={() => a.setFileMenuOpen(!a.fileMenuOpen)}
+        >
+          {a.t("tab.file")}
+        </button>
+
         {TABS.map((x) => (
-          <button key={x.id} role="tab" aria-selected={x.id === tab} className={x.id === tab ? "on" : ""} onClick={() => setTab(x.id)}>
+          <button
+            key={x.id}
+            role="tab"
+            aria-selected={x.id === tab && !a.fileMenuOpen}
+            className={x.id === tab && !a.fileMenuOpen ? "on" : ""}
+            onClick={() => { a.setFileMenuOpen(false); setTab(x.id); if (collapsed) setCollapsed(false); }}
+          >
             {a.t(x.labelKey)}
           </button>
         ))}
-        <label className="lang-pick" title={a.t("lang.label")}>
-          <Icon name="language" size={14} />
-          <select aria-label={a.t("lang.label")} value={a.uiLangPref} onChange={(e) => a.setUiLang(e.target.value as LangPref)}>
-            <option value="auto">{a.t("lang.auto", { lang: sysLangLabel })}</option>
-            <option value="pt">{a.t("lang.pt")}</option>
-            <option value="en">{a.t("lang.en")}</option>
-            <option value="es">{a.t("lang.es")}</option>
-          </select>
-        </label>
+
+        <div className="ribbon-right">
+          <button
+            type="button"
+            className="theme-btn"
+            title={`${a.t("theme.label")}: ${a.t(a.theme === "dark" ? "theme.dark" : a.theme === "light" ? "theme.light" : "theme.auto")}`}
+            onClick={nextTheme}
+          >
+            <Icon name={a.theme === "dark" ? "moon" : "sun"} size={14} />
+          </button>
+          <label className="lang-pick" title={a.t("lang.label")}>
+            <Icon name="language" size={14} />
+            <select aria-label={a.t("lang.label")} value={a.uiLangPref} onChange={(e) => a.setUiLang(e.target.value as LangPref)}>
+              <option value="auto">{a.t("lang.auto", { lang: sysLangLabel })}</option>
+              <option value="pt">{a.t("lang.pt")}</option>
+              <option value="en">{a.t("lang.en")}</option>
+              <option value="es">{a.t("lang.es")}</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            className="collapse-btn"
+            title={a.t(collapsed ? "ribbon.expand" : "ribbon.collapse")}
+            onClick={() => setCollapsed((v) => !v)}
+          >
+            <Icon name={collapsed ? "chevDown" : "chevUp"} size={14} />
+          </button>
+        </div>
       </nav>
-      <div className="ribbon-body" role="toolbar">
-        {active.groups.map((g) => (
-          <section key={g.labelKey} className="rgroup">
-            <div className="rgroup-cmds">
-              {g.cmds.map((c) =>
-                c === "ocrlang" ? (
-                  <label key="ocrlang" className="ocrlang">
-                    <Icon name="language" size={20} />
-                    <select aria-label={a.t("ribbon.ocrLangAria")} value={a.ocrLang} disabled={!!a.busy} onChange={(e) => a.setOcrLang(e.target.value)}>
-                      {ocrOpts.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
-                    </select>
-                  </label>
-                ) : c === "ocropts" ? (
-                  <div key="ocropts" className="ocropts">
-                    <select aria-label={a.t("ribbon.ocrQualAria")} value={a.ocrQuality} disabled={!!a.busy} onChange={(e) => a.setOcrQuality(e.target.value as "neural" | "best" | "fast")}>
-                      <option value="neural">{a.t("ribbon.ocrNeural")}</option>
-                      <option value="best">{a.t("ribbon.ocrBest")}</option>
-                      <option value="fast">{a.t("ribbon.ocrFast")}</option>
-                    </select>
-                    <label title={a.t("ribbon.ocrCleanupTip")}>
-                      <input type="checkbox" checked={a.ocrCleanup} disabled={!!a.busy} onChange={(e) => a.setOcrCleanup(e.target.checked)} />
-                      {a.t("ribbon.ocrCleanup")}
+
+      {!collapsed && (
+        <div className="ribbon-body" role="toolbar">
+          {active.groups.map((g) => (
+            <section key={g.labelKey} className="rgroup">
+              <div className="rgroup-cmds">
+                {g.cmds.map((c) =>
+                  c === "ocrlang" ? (
+                    <label key="ocrlang" className="ocrlang">
+                      <Icon name="language" size={20} />
+                      <select aria-label={a.t("ribbon.ocrLangAria")} value={a.ocrLang} disabled={!!a.busy} onChange={(e) => a.setOcrLang(e.target.value)}>
+                        {ocrOpts.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+                      </select>
                     </label>
-                  </div>
-                ) : c === "color" ? (
-                  <div key="color" className="swatches">
-                    {SWATCHES.map((s) => (
-                      <button key={s.join()} title={a.t("ribbon.swatchTip")} className={s.join() === a.color.join() ? "sw on" : "sw"}
-                        style={{ background: css(s) }} onClick={() => a.setColor(s)} />
-                    ))}
-                  </div>
-                ) : (
-                  <button key={c.id} className={(c.tool && a.tool === c.tool) || c.on?.(a) ? "rbtn on" : "rbtn"}
-                    title={c.titleKey ? a.t(c.titleKey) : a.t(c.labelKey)}
-                    aria-pressed={c.on ? !!c.on(a) : undefined}
-                    disabled={(c.needsDoc && !a.doc) || (c.enabled ? !c.enabled(a) : false) || !!a.busy}
-                    onClick={() => { if (c.tool) { a.setTool(c.tool); a.setView("read"); } c.run?.(a); }}>
-                    <Icon name={c.icon} size={22} />
-                    <span>{a.t(c.labelKey)}</span>
-                  </button>
-                ),
-              )}
-            </div>
-            <div className="rgroup-label">{a.t(g.labelKey)}</div>
-          </section>
-        ))}
-      </div>
+                  ) : c === "ocropts" ? (
+                    <div key="ocropts" className="ocropts">
+                      <select aria-label={a.t("ribbon.ocrQualAria")} value={a.ocrQuality} disabled={!!a.busy} onChange={(e) => a.setOcrQuality(e.target.value as "neural" | "best" | "fast")}>
+                        <option value="neural">{a.t("ribbon.ocrNeural")}</option>
+                        <option value="best">{a.t("ribbon.ocrBest")}</option>
+                        <option value="fast">{a.t("ribbon.ocrFast")}</option>
+                      </select>
+                      <label title={a.t("ribbon.ocrCleanupTip")}>
+                        <input type="checkbox" checked={a.ocrCleanup} disabled={!!a.busy} onChange={(e) => a.setOcrCleanup(e.target.checked)} />
+                        {a.t("ribbon.ocrCleanup")}
+                      </label>
+                    </div>
+                  ) : c === "color" ? (
+                    <div key="color" className="swatches">
+                      {SWATCHES.map((s) => (
+                        <button key={s.join()} title={a.t("ribbon.swatchTip")} className={s.join() === a.color.join() ? "sw on" : "sw"}
+                          style={{ background: css(s) }} onClick={() => a.setColor(s)} />
+                      ))}
+                    </div>
+                  ) : (
+                    <button key={c.id} className={(c.tool && a.tool === c.tool) || c.on?.(a) ? "rbtn on" : "rbtn"}
+                      title={c.titleKey ? a.t(c.titleKey) : a.t(c.labelKey)}
+                      aria-pressed={c.on ? !!c.on(a) : undefined}
+                      disabled={(c.needsDoc && !a.doc) || (c.enabled ? !c.enabled(a) : false) || !!a.busy}
+                      onClick={() => { if (c.tool) { a.setHomeOpen(false); a.setTool(c.tool); a.setView("read"); } c.run?.(a); }}>
+                      <Icon name={c.icon} size={22} />
+                      <span>{a.t(c.labelKey)}</span>
+                    </button>
+                  ),
+                )}
+              </div>
+              <div className="rgroup-label">{a.t(g.labelKey)}</div>
+            </section>
+          ))}
+        </div>
+      )}
     </header>
   );
 }

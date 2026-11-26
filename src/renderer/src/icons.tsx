@@ -95,6 +95,16 @@ const P: Record<string, JSX.Element> = {
   speak: <><path d="M4 9v6h4l5 4V5L8 9z" /><path d="M16.5 8.5a5 5 0 010 7M19 6a8.5 8.5 0 010 12" /></>,
   pause: <><path d="M8 5v14M16 5v14" /></>,
   stop: <><rect x="6" y="6" width="12" height="12" rx="1" /></>,
+  home: <><path d="M3 10.5L12 3l9 7.5" /><path d="M5.5 9.5V20h13V9.5" /></>,
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2.5v2.5M12 19v2.5M4.5 12H2M22 12h-2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8" /></>,
+  moon: <><path d="M20.5 13.5A8.5 8.5 0 1110.5 3.5a6.8 6.8 0 0010 10z" /></>,
+  chevUp: <><path d="M6 15l6-6 6 6" /></>,
+  chevDown: <><path d="M6 9l6 6 6-6" /></>,
+  list: <><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" /></>,
+  firstPage: <><path d="M7 6v12M17 6l-6 6 6 6" /></>,
+  lastPage: <><path d="M17 6v12M7 6l6 6-6 6" /></>,
+  info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>,
+  back: <><path d="M19 12H5M11 6l-6 6 6 6" /></>,
 };
 
 export function Icon({ name, size = 20 }: { name: string; size?: number }) {

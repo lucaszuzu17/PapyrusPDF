@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { I18nKey } from "../../shared/i18n.ts";
 import { Dialogs } from "./Dialogs.tsx";
+import { FileBackstage } from "./FileBackstage.tsx";
 import { Icon } from "./icons.tsx";
 import { Organizer } from "./Organizer.tsx";
 import { Ribbon } from "./Ribbon.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { AppProvider, useApp, type Tool } from "./state.tsx";
 import { tts, type TtsState } from "./tts.ts";
-import { Viewer } from "./Viewer.tsx";
+import { Viewer, Welcome } from "./Viewer.tsx";
 
 export function App() {
   return (
@@ -85,8 +86,8 @@ function Shell() {
         </div>
       )}
       <main className="work">
-        {!fs && <Sidebar />}
-        {app.view === "organize" && !fs ? <Organizer /> : <Viewer />}
+        {!fs && !app.homeOpen && <Sidebar />}
+        {app.homeOpen && !fs ? <div className="viewer home-viewer"><Welcome /></div> : app.view === "organize" && !fs ? <Organizer /> : <Viewer />}
       </main>
       {!fs && <StatusBar />}
       {fs && (
@@ -94,6 +95,7 @@ function Shell() {
           <Icon name="close" size={16} /> {app.t("app.fsExit")}
         </button>
       )}
+      <FileBackstage />
       <Dialogs />
       {app.busy && (
         <div className="busy" role="status">
@@ -116,14 +118,23 @@ function Shell() {
   );
 }
 
-/** Barra de abas: um documento por aba, como num navegador. */
+/** Barra de abas: aba fixa "Página Inicial" + um documento por aba, estilo Foxit. */
 function TabBar() {
   const app = useApp();
   if (!app.tabs.length) return null;
   return (
     <nav className="tabbar" role="tablist" aria-label={app.t("app.openDocsAria")}>
+      <button
+        type="button"
+        className={app.homeOpen ? "hometab on" : "hometab"}
+        title={app.t("app.homeTab")}
+        aria-label={app.t("app.homeTab")}
+        onClick={() => app.setHomeOpen(!app.homeOpen)}
+      >
+        <Icon name="home" size={14} />
+      </button>
       {app.tabs.map((x) => {
-        const on = x.id === app.doc?.id;
+        const on = !app.homeOpen && x.id === app.doc?.id;
         return (
           <div key={x.id} className={on ? "doctab on" : "doctab"} role="tab" aria-selected={on} title={x.path ?? x.name}
             onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); app.closeTab(x.id); } }}>
@@ -148,8 +159,9 @@ function StatusBar() {
   const app = useApp();
   const [pg, setPg] = useState("1");
   useEffect(() => setPg(String(app.page + 1)), [app.page]);
-  if (!app.doc) return <footer className="status" />;
+  if (!app.doc || app.homeOpen) return <footer className="status"><span className="hint">PapyrusPDF — 100% Offline</span></footer>;
   const n = app.doc.info.pageCount;
+  const zoomPct = Math.round(app.zoom * 100);
   return (
     <footer className="status">
       <span className="hint">{app.t(HINT_KEY[app.tool])}</span>
@@ -162,17 +174,35 @@ function StatusBar() {
           </select>
         </label>
       )}
-      <button title={app.t("app.prevPage")} disabled={app.page === 0} onClick={() => app.goTo(app.page - 1)}><Icon name="chevL" size={16} /></button>
-      <form onSubmit={(e) => { e.preventDefault(); const p = Number(pg) - 1; if (p >= 0 && p < n) app.goTo(p); }}>
-        <input className="pgnum" value={pg} onChange={(e) => setPg(e.target.value)} aria-label={app.t("common.page")} /> / {n}
-      </form>
-      <button title={app.t("app.nextPage")} disabled={app.page >= n - 1} onClick={() => app.goTo(app.page + 1)}><Icon name="chevR" size={16} /></button>
-      <button title={app.t("app.onePage")} className={app.layout === "single" ? "on" : ""} onClick={() => app.setLayout("single")}><Icon name="onePage" size={16} /></button>
-      <button title={app.t("app.twoPages")} className={app.layout === "double" ? "on" : ""} onClick={() => app.setLayout("double")}><Icon name="twoPages" size={16} /></button>
-      <button title={app.t("app.fullscreenTip")} onClick={() => app.toggleFullScreen(true)}><Icon name="fullscreen" size={16} /></button>
-      <button title={app.t("cmd.zoomOut")} onClick={() => app.setZoom((z) => z / 1.2)}><Icon name="zoomOut" size={16} /></button>
-      <span className="zoom">{Math.round(app.zoom * 100)}%</span>
-      <button title={app.t("cmd.zoomIn")} onClick={() => app.setZoom((z) => z * 1.2)}><Icon name="zoomIn" size={16} /></button>
+      <div className="st-nav">
+        <button title={app.t("app.firstPage")} disabled={app.page === 0} onClick={() => app.goTo(0)}><Icon name="firstPage" size={15} /></button>
+        <button title={app.t("app.prevPage")} disabled={app.page === 0} onClick={() => app.goTo(app.page - 1)}><Icon name="chevL" size={15} /></button>
+        <form onSubmit={(e) => { e.preventDefault(); const p = Number(pg) - 1; if (p >= 0 && p < n) app.goTo(p); }}>
+          <input className="pgnum" value={pg} onChange={(e) => setPg(e.target.value)} aria-label={app.t("common.page")} /> / {n}
+        </form>
+        <button title={app.t("app.nextPage")} disabled={app.page >= n - 1} onClick={() => app.goTo(app.page + 1)}><Icon name="chevR" size={15} /></button>
+        <button title={app.t("app.lastPage")} disabled={app.page >= n - 1} onClick={() => app.goTo(n - 1)}><Icon name="lastPage" size={15} /></button>
+      </div>
+      <span className="st-sep" />
+      <button title={app.t("app.onePage")} className={app.layout === "single" ? "on" : ""} onClick={() => app.setLayout("single")}><Icon name="onePage" size={15} /></button>
+      <button title={app.t("app.twoPages")} className={app.layout === "double" ? "on" : ""} onClick={() => app.setLayout("double")}><Icon name="twoPages" size={15} /></button>
+      <button title={app.t("app.fullscreenTip")} onClick={() => app.toggleFullScreen(true)}><Icon name="fullscreen" size={15} /></button>
+      <span className="st-sep" />
+      <div className="st-zoom">
+        <button title={app.t("cmd.zoomOut")} onClick={() => app.setZoom((z) => z / 1.2)}><Icon name="zoomOut" size={15} /></button>
+        <input
+          type="range"
+          className="zoom-slider"
+          min={25}
+          max={400}
+          step={5}
+          value={Math.max(25, Math.min(400, zoomPct))}
+          onChange={(e) => app.setZoom(Number(e.target.value) / 100)}
+          aria-label="Zoom"
+        />
+        <button title={app.t("cmd.zoomIn")} onClick={() => app.setZoom((z) => z * 1.2)}><Icon name="zoomIn" size={15} /></button>
+        <button type="button" className="zoom" title={app.t("cmd.fit")} onClick={() => app.fitWidth()}>{zoomPct}%</button>
+      </div>
     </footer>
   );
 }
@@ -217,7 +247,7 @@ function useShortcuts() {
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
       const k = e.key.toLowerCase();
       // com uma operação em andamento ou um diálogo aberto, os atalhos que mexem no documento esperam
-      const free = !app.busy && !app.dialog;
+      const free = !app.busy && !app.dialog && !app.printOpen;
       if (e.key === "F11") { e.preventDefault(); if (app.doc || app.fullscreen) app.toggleFullScreen(); return; }
       if (app.fullscreen && !typing && !app.dialog) {
         // em tela cheia, as setas e o Page Up/Down trocam de página
