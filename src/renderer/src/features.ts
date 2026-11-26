@@ -1,28 +1,33 @@
 // Comandos com formulário: proteger, comprimir, cabeçalho/rodapé, numeração,
-// marca d'água, carimbos e exportação de imagens.
-import { engine, type BatchAction, type MarginPos, type RGB } from "./api.ts";
-import { makeStamp, prepareImages, STAMP_PRESETS } from "./images.ts";
+// marca d'água, carimbos, exportação, lote, LGPD, Bates, PageLabels, A1 e formulários.
+import { formatBytes, localeTag, type I18nKey } from "../../shared/i18n.ts";
+import {
+  engine, type BatchAction, type MarginPos, type OptimizeOptions, type PageLabelRule,
+  type PageLabelStyle, type RedactPatternId, type RGB,
+} from "./api.ts";
+import { makeStamp, prepareImages, stampPresets } from "./images.ts";
 import { generatePassword, passwordStrength } from "./password.ts";
-import { OCR_LANGS, type ReadMode, type useApp } from "./state.tsx";
+import { ocrLangOptions, type ReadMode, type useApp } from "./state.tsx";
 
 type App = ReturnType<typeof useApp>;
 
 const base = (a: App) => a.doc!.name.replace(/\.pdf$/i, "");
 const fileName = (path: string) => path.split(/[\\/]/).pop()!;
-const size = (n: number) => (n >= 1048576 ? `${(n / 1048576).toFixed(1).replace(".", ",")} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const size = (n: number, a: App) => formatBytes(n, a.lang);
 const samePath = (a: string | null, b: string) => !!a && a.replace(/\//g, "\\").toLowerCase() === b.replace(/\//g, "\\").toLowerCase();
 const allPages = (a: App) => Array.from({ length: a.doc!.info.pageCount }, (_, i) => i);
 
 // ---------- proteger ----------
 
 export async function protect(a: App): Promise<void> {
+  const { t, lang } = a;
   const v = await a.askForm({
-    title: "Proteger com senha", okLabel: "Proteger e salvar…",
-    message: "A senha passa a ser pedida para abrir o arquivo. As permissões valem para quem abrir o PDF em outros programas.",
+    title: t("feat.protectTitle"), okLabel: t("feat.protectOk"),
+    message: t("feat.protectMsg"),
     fields: [
-      { id: "pw", label: "Senha para abrir (em branco = não pede)", type: "password", value: "", span: 3,
+      { id: "pw", label: t("feat.protectPw"), type: "password", value: "", span: 3,
         action: {
-          label: "Gerar senha forte", reveal: true,
+          label: t("feat.protectGenBtn"), reveal: true,
           run: (cur) => {
             const g = generatePassword();
             navigator.clipboard.writeText(g).catch(() => {});
@@ -32,33 +37,33 @@ export async function protect(a: App): Promise<void> {
         note: (cur) => {
           const pw = String(cur.pw);
           if (!pw) return null;
-          const st = passwordStrength(pw);
+          const st = passwordStrength(pw, lang);
           return { text: `${st.label}. ${st.hint}`, level: st.score };
         } },
-      { id: "pw2", label: "Repita a senha", type: "password", value: "", span: 3,
+      { id: "pw2", label: t("feat.protectPw2"), type: "password", value: "", span: 3,
         note: (cur) => (cur.gen && cur.gen === cur.pw && cur.pw === cur.pw2
-          ? { text: "Senha gerada e copiada para a área de transferência: guarde-a num lugar seguro." } : null) },
-      { id: "print", label: "Permitir imprimir", type: "checkbox", value: true, span: 3 },
-      { id: "copy", label: "Permitir copiar texto e imagens", type: "checkbox", value: true, span: 3 },
-      { id: "edit", label: "Permitir alterar o conteúdo", type: "checkbox", value: true, span: 3 },
-      { id: "annotate", label: "Permitir comentar e preencher", type: "checkbox", value: true, span: 3 },
-      { id: "recipient", label: "Cópia para (opcional): o nome vira marca d'água e rodapé em todas as páginas", type: "text", value: "",
-        placeholder: "Ex.: João Silva — Construtora Exemplo",
-        note: (cur) => (String(cur.recipient).trim() ? { text: "Grava uma cópia marcada; o documento aberto continua sem a marca." } : null) },
-      { id: "img", label: "Páginas como imagem", type: "select", value: "0", options: [
-        { value: "0", label: "Não — o texto continua selecionável e pesquisável" },
-        { value: "150", label: "Sim, 150 dpi — dificulta copiar e editar o texto" },
-        { value: "200", label: "Sim, 200 dpi — idem, com melhor qualidade de impressão" },
-      ], note: (cur) => (cur.img !== "0" ? { text: "Na cópia, o texto vira parte da imagem: não dá mais para selecionar, pesquisar nem editar. A marca do destinatário também fica presa na imagem." } : null) },
+          ? { text: t("feat.protectGenNote") } : null) },
+      { id: "print", label: t("feat.protectAllowPrint"), type: "checkbox", value: true, span: 3 },
+      { id: "copy", label: t("feat.protectAllowCopy"), type: "checkbox", value: true, span: 3 },
+      { id: "edit", label: t("feat.protectAllowEdit"), type: "checkbox", value: true, span: 3 },
+      { id: "annotate", label: t("feat.protectAllowAnnot"), type: "checkbox", value: true, span: 3 },
+      { id: "recipient", label: t("feat.protectRecipient"), type: "text", value: "",
+        placeholder: t("feat.protectRecipientPh"),
+        note: (cur) => (String(cur.recipient).trim() ? { text: t("feat.protectRecipientNote") } : null) },
+      { id: "img", label: t("feat.protectImg"), type: "select", value: "0", options: [
+        { value: "0", label: t("feat.protectImg0") },
+        { value: "150", label: t("feat.protectImg150") },
+        { value: "200", label: t("feat.protectImg200") },
+      ], note: (cur) => (cur.img !== "0" ? { text: t("feat.protectImgNote") } : null) },
     ],
     validate: (f) => {
       const pw = String(f.pw);
-      if (pw !== String(f.pw2)) return "As duas senhas não são iguais.";
-      if (/[,=]/.test(pw)) return "A senha não pode ter vírgula nem sinal de igual.";
-      if (pw.length > 100) return "A senha pode ter no máximo 100 caracteres.";
+      if (pw !== String(f.pw2)) return t("feat.protectErrMismatch");
+      if (/[,=]/.test(pw)) return t("feat.protectErrChars");
+      if (pw.length > 100) return t("feat.protectErrLen");
       const copy = String(f.recipient).trim() || f.img !== "0";
-      if (!pw && !copy && f.print && f.copy && f.edit && f.annotate) return "Defina uma senha ou desmarque pelo menos uma permissão.";
-      if (String(f.recipient).length > 60) return "O nome do destinatário pode ter no máximo 60 caracteres.";
+      if (!pw && !copy && f.print && f.copy && f.edit && f.annotate) return t("feat.protectErrEmpty");
+      if (String(f.recipient).length > 60) return t("feat.protectErrRecipLen");
       return null;
     },
   });
@@ -68,11 +73,11 @@ export async function protect(a: App): Promise<void> {
   const imageOnly = Number(v.img) || 0;
   const copyOnly = !!recipient || imageOnly > 0;
   const slug = recipient.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
-  const suggested = copyOnly ? `${base(a)}_${slug || "imagem"}.pdf` : a.doc!.path ?? `${base(a)}_protegido.pdf`;
+  const suggested = copyOnly ? `${base(a)}_${slug || t("feat.protectImgSuffix")}.pdf` : a.doc!.path ?? `${base(a)}_${t("feat.protectSuffix")}.pdf`;
   const path = await window.papiro.saveDialog(suggested);
   if (!path) return;
-  if (copyOnly && samePath(a.doc!.path, path)) { a.notify("Escolha outro nome: a cópia não pode substituir o arquivo aberto."); return; }
-  await a.task(copyOnly ? "Gerando a cópia…" : "Protegendo…", async () => {
+  if (copyOnly && samePath(a.doc!.path, path)) { a.notify(t("feat.protectSamePath")); return; }
+  await a.task(copyOnly ? t("feat.protectBusyCopy") : t("feat.protectBusy"), async () => {
     const bytes = await engine.exportProtected({
       userPassword: pw || undefined,
       permissions: { print: !!v.print, copy: !!v.copy, edit: !!v.edit, annotate: !!v.annotate },
@@ -81,107 +86,140 @@ export async function protect(a: App): Promise<void> {
     });
     try { await window.papiro.writeFile(path, bytes); } finally { await a.refresh(); }
     if (copyOnly) {
-      // cópia para outra pessoa: o original continua aberto, sem a marca
-      a.notify(`${recipient ? `Cópia para ${recipient}` : "Cópia em imagem"} salva em ${path}${pw ? " (com senha)" : ""}. O documento aberto não mudou.`);
+      const what = recipient ? t("feat.protectCopyRecip", { recipient }) : t("feat.protectCopyImg");
+      a.notify(t("feat.protectCopyDone", { what, path, pw: pw ? t("feat.protectWithPw") : "" }));
       return;
     }
     await a.adoptFile(path, bytes, pw);
-    a.notify(pw ? `Protegido com senha e salvo em ${path}. Guarde a senha: sem ela o arquivo não abre.`
-      : `Restrições aplicadas e salvas em ${path}.`);
+    a.notify(pw ? t("feat.protectDonePw", { path }) : t("feat.protectDonePerm", { path }));
   });
 }
 
 export async function unprotect(a: App): Promise<void> {
+  const { t } = a;
   const ok = await a.ask({
-    kind: "confirm", title: "Remover proteção", okLabel: "Remover e salvar…",
-    message: "Será gravada uma versão sem senha e sem restrições. Qualquer pessoa com o arquivo poderá abri-lo.",
+    kind: "confirm", title: t("feat.unprotectTitle"), okLabel: t("feat.unprotectOk"),
+    message: t("feat.unprotectMsg"),
   });
   if (ok === null) return;
-  const path = await window.papiro.saveDialog(a.doc!.path ?? `${base(a)}_sem_senha.pdf`);
+  const path = await window.papiro.saveDialog(a.doc!.path ?? `${base(a)}_${t("feat.unprotectSuffix")}.pdf`);
   if (!path) return;
-  await a.task("Removendo proteção…", async () => {
+  await a.task(t("feat.unprotectBusy"), async () => {
     const bytes = await engine.exportUnprotected();
     try { await window.papiro.writeFile(path, bytes); } finally { await a.refresh(); }
     await a.adoptFile(path, bytes);
-    a.notify(`Proteção removida. Salvo em ${path}.`);
+    a.notify(t("feat.unprotectDone", { path }));
   });
 }
 
-// ---------- comprimir ----------
+// ---------- otimizar / comprimir + auditoria de espaço ----------
 
 export async function compress(a: App): Promise<void> {
+  const { t } = a;
+  const audit = await a.task(t("feat.auditBusy"), () => engine.auditSpace());
+  const pctOf = (v: number) => (audit && audit.totalBytes > 0 ? Math.round((v / audit.totalBytes) * 100) : 0);
+  const auditText = audit
+    ? t("feat.auditSummary", {
+      total: size(audit.totalBytes, a),
+      img: size(audit.images, a), imgPct: pctOf(audit.images), imgCount: audit.imageCount,
+      font: size(audit.fonts, a), fontPct: pctOf(audit.fonts), fontCount: audit.fontCount,
+      streams: size(audit.streams, a), streamsPct: pctOf(audit.streams),
+      attach: audit.attachments ? t("feat.auditAttach", { size: size(audit.attachments, a), count: audit.attachmentCount }) : "",
+      meta: audit.metadata ? t("feat.auditMeta", { size: size(audit.metadata, a) }) : "",
+    })
+    : t("feat.compressFallbackMsg");
+
   const v = await a.askForm({
-    title: "Comprimir PDF", okLabel: "Comprimir e salvar…",
-    message: "Reduz o tamanho das imagens e compacta o arquivo. É gravada uma cópia; o documento aberto não muda.",
-    fields: [{ id: "level", label: "Compressão", type: "select", value: "media", options: [
-      { value: "leve", label: "Leve — qualidade quase igual (boa para imprimir)" },
-      { value: "media", label: "Média — bom equilíbrio (e-mail, arquivo)" },
-      { value: "forte", label: "Forte — arquivo menor, imagens com menos detalhe" },
-    ] }],
+    title: t("feat.compressTitle"), okLabel: t("feat.compressOk"),
+    message: auditText,
+    fields: [
+      { id: "level", label: t("feat.compressLevel"), type: "select", value: "media", options: [
+        { value: "nenhuma", label: t("feat.compressNone") },
+        { value: "leve", label: t("feat.compressLight") },
+        { value: "media", label: t("feat.compressMed") },
+        { value: "forte", label: t("feat.compressStrong") },
+      ] },
+      { id: "subsetFonts", label: t("feat.compressSubset"), type: "checkbox", value: true, span: 3 },
+      { id: "deduplicate", label: t("feat.compressDedup"), type: "checkbox", value: true, span: 3 },
+      { id: "stripThumbnails", label: t("feat.compressThumbs"), type: "checkbox", value: true, span: 3 },
+      { id: "stripMetadata", label: t("feat.compressMeta"), type: "checkbox", value: false, span: 3 },
+      { id: "stripAttachments", label: t("feat.compressAttach"), type: "checkbox", value: false, span: 3 },
+      { id: "stripJavaScript", label: t("feat.compressJs"), type: "checkbox", value: false, span: 3 },
+    ],
   });
   if (!v) return;
-  const r = await a.task("Comprimindo…", () => engine.exportCompressed(v.level as "leve" | "media" | "forte"));
-  await a.refresh();
+  const opts: OptimizeOptions = {
+    level: v.level as OptimizeOptions["level"],
+    subsetFonts: !!v.subsetFonts,
+    deduplicate: !!v.deduplicate,
+    stripThumbnails: !!v.stripThumbnails,
+    stripMetadata: !!v.stripMetadata,
+    stripAttachments: !!v.stripAttachments,
+    stripJavaScript: !!v.stripJavaScript,
+  };
+  const r = await a.task(t("feat.compressBusy"), () => engine.exportOptimized(opts));
   if (!r) return;
-  if (r.after >= r.before) { a.notify(`Este PDF já está compacto (${size(r.before)}); não há o que reduzir.`); return; }
+  const structural = !!(opts.stripMetadata || opts.stripAttachments || opts.stripJavaScript);
+  if (!structural && r.after >= r.before) { a.notify(t("feat.compressAlready", { size: size(r.before, a) })); return; }
   const pct = Math.round((1 - r.after / r.before) * 100);
-  const path = await window.papiro.saveDialog(`${base(a)}_comprimido.pdf`);
+  const path = await window.papiro.saveDialog(`${base(a)}_${t("feat.compressSuffix")}.pdf`);
   if (!path) return;
-  await a.task("Salvando…", async () => {
+  await a.task(t("common.saving"), async () => {
     await window.papiro.writeFile(path, r.bytes);
-    // gravou por cima do arquivo aberto: passa a trabalhar na versão comprimida
     if (samePath(a.doc!.path, path)) await a.adoptFile(path, r.bytes);
-    a.notify(`De ${size(r.before)} para ${size(r.after)} (−${pct}%). Salvo em ${path}.`);
+    const delta = pct >= 0 ? `−${pct}%` : `+${Math.abs(pct)}%`;
+    a.notify(t("feat.compressDone", { before: size(r.before, a), after: size(r.after, a), delta, path }));
   });
 }
 
 // ---------- cabeçalho, rodapé e numeração ----------
 
 const SIZES = ["8", "9", "10", "11", "12", "14"].map((s) => ({ value: s, label: `${s} pt` }));
-const TOKENS = "Marcadores: {p} número da página · {n} último número · {total} total de páginas · {data} data de hoje · {arquivo} nome do arquivo.";
 
 export async function headerFooter(a: App): Promise<void> {
+  const { t } = a;
   const cell = (id: MarginPos, label: string) => ({ id, label, type: "text" as const, value: "", span: 2 as const });
   const v = await a.askForm({
-    title: "Cabeçalho e rodapé", okLabel: "Aplicar", message: TOKENS,
+    title: t("feat.hfTitle"), okLabel: t("feat.hfOk"), message: t("feat.hfTokens"),
     fields: [
-      cell("tl", "Cabeçalho à esquerda"), cell("tc", "Cabeçalho no centro"), cell("tr", "Cabeçalho à direita"),
-      cell("bl", "Rodapé à esquerda"), cell("bc", "Rodapé no centro"), cell("br", "Rodapé à direita"),
-      { id: "size", label: "Tamanho da letra", type: "select", value: "10", options: SIZES, span: 3 },
-      { id: "skip", label: "Não aplicar na primeira página (capa)", type: "checkbox", value: false, span: 3 },
+      cell("tl", t("feat.hfTl")), cell("tc", t("feat.hfTc")), cell("tr", t("feat.hfTr")),
+      cell("bl", t("feat.hfBl")), cell("bc", t("feat.hfBc")), cell("br", t("feat.hfBr")),
+      { id: "size", label: t("feat.fontSize"), type: "select", value: "10", options: SIZES, span: 3 },
+      { id: "skip", label: t("feat.hfSkipCover"), type: "checkbox", value: false, span: 3 },
     ],
-    validate: (f) => ((["tl", "tc", "tr", "bl", "bc", "br"] as const).some((k) => String(f[k]).trim()) ? null : "Preencha pelo menos uma posição."),
+    validate: (f) => ((["tl", "tc", "tr", "bl", "bc", "br"] as const).some((k) => String(f[k]).trim()) ? null : t("feat.hfNeedOne")),
   });
   if (!v) return;
   const items = (["tl", "tc", "tr", "bl", "bc", "br"] as MarginPos[]).map((pos) => ({ pos, text: String(v[pos]) })).filter((it) => it.text.trim());
   const skip = !!v.skip && a.doc!.info.pageCount > 1;
-  await a.mutate("Aplicando…", () => engine.addHeaderFooter({
+  await a.mutate(t("common.applying"), () => engine.addHeaderFooter({
     items, size: Number(v.size), pages: skip ? allPages(a).slice(1) : undefined, startAt: skip ? 2 : 1,
   }));
 }
 
 export async function numberPages(a: App): Promise<void> {
+  const { t } = a;
   const v = await a.askForm({
-    title: "Numerar páginas", okLabel: "Numerar",
+    title: t("feat.numTitle"), okLabel: t("feat.numOk"),
     fields: [
-      { id: "pos", label: "Posição", type: "select", value: "bc", span: 3, options: [
-        { value: "bc", label: "Rodapé, no centro" }, { value: "br", label: "Rodapé, à direita" }, { value: "bl", label: "Rodapé, à esquerda" },
-        { value: "tc", label: "Cabeçalho, no centro" }, { value: "tr", label: "Cabeçalho, à direita" }, { value: "tl", label: "Cabeçalho, à esquerda" },
+      { id: "pos", label: t("feat.pos"), type: "select", value: "bc", span: 3, options: [
+        { value: "bc", label: t("feat.posBc") }, { value: "br", label: t("feat.posBr") }, { value: "bl", label: t("feat.posBl") },
+        { value: "tc", label: t("feat.posTc") }, { value: "tr", label: t("feat.posTr") }, { value: "tl", label: t("feat.posTl") },
       ] },
-      { id: "fmt", label: "Formato", type: "select", value: "{p}", span: 3, options: [
-        { value: "{p}", label: "1" }, { value: "Página {p}", label: "Página 1" },
-        { value: "{p} / {n}", label: "1 / 10" }, { value: "Página {p} de {n}", label: "Página 1 de 10" },
+      { id: "fmt", label: t("feat.format"), type: "select", value: "{p}", span: 3, options: [
+        { value: "{p}", label: "1" }, { value: t("feat.numFmtPage"), label: t("feat.numFmtPageLbl") },
+        { value: "{p} / {n}", label: "1 / 10" }, { value: t("feat.numFmtOf"), label: t("feat.numFmtOfLbl") },
       ] },
-      { id: "start", label: "Primeiro número", type: "number", value: "1", span: 2 },
-      { id: "size", label: "Tamanho da letra", type: "select", value: "10", options: SIZES, span: 2 },
-      { id: "skip", label: "Pular a capa", type: "checkbox", value: false, span: 2 },
+      { id: "start", label: t("feat.startNum"), type: "number", value: "1", span: 2 },
+      { id: "size", label: t("feat.fontSize"), type: "select", value: "10", options: SIZES, span: 2 },
+      { id: "skip", label: t("feat.skipCover"), type: "checkbox", value: false, span: 2 },
     ],
-    validate: (f) => (/^\d{1,6}$/.test(String(f.start).trim()) ? null : "O primeiro número deve ser um inteiro (0 ou mais)."),
+    validate: (f) => (/^\d{1,6}$/.test(String(f.start).trim()) ? null : t("feat.startNumErr")),
   });
   if (!v) return;
   const skip = !!v.skip && a.doc!.info.pageCount > 1;
   const start = Number(String(v.start).trim());
-  await a.mutate("Numerando…", () => engine.addHeaderFooter({
+  await a.mutate(t("feat.numbering"), () => engine.addHeaderFooter({
     items: [{ pos: v.pos as MarginPos, text: String(v.fmt) }], size: Number(v.size),
     pages: skip ? allPages(a).slice(1) : undefined, startAt: skip ? start + 1 : start,
   }));
@@ -192,25 +230,26 @@ export async function numberPages(a: App): Promise<void> {
 const WM_COLORS: Record<string, RGB> = { cinza: [0.55, 0.55, 0.55], vermelho: [0.85, 0.1, 0.1], azul: [0.1, 0.3, 0.8] };
 
 export async function watermark(a: App): Promise<void> {
+  const { t } = a;
   const v = await a.askForm({
-    title: "Marca d'água", okLabel: "Aplicar em todas as páginas",
+    title: t("feat.wmTitle"), okLabel: t("feat.wmOk"),
     fields: [
-      { id: "text", label: "Texto", type: "text", value: "CONFIDENCIAL" },
-      { id: "angle", label: "Direção", type: "select", value: "45", span: 3, options: [{ value: "45", label: "Diagonal" }, { value: "0", label: "Horizontal" }] },
-      { id: "opacity", label: "Intensidade", type: "select", value: "0.18", span: 3, options: [
-        { value: "0.1", label: "Bem leve" }, { value: "0.18", label: "Leve" }, { value: "0.3", label: "Média" }, { value: "0.5", label: "Forte" },
+      { id: "text", label: t("feat.wmText"), type: "text", value: t("feat.wmDefault") },
+      { id: "angle", label: t("feat.wmDir"), type: "select", value: "45", span: 3, options: [{ value: "45", label: t("feat.wmDiag") }, { value: "0", label: t("feat.wmHoriz") }] },
+      { id: "opacity", label: t("feat.wmOpacity"), type: "select", value: "0.18", span: 3, options: [
+        { value: "0.1", label: t("feat.wmOp01") }, { value: "0.18", label: t("feat.wmOp018") }, { value: "0.3", label: t("feat.wmOp03") }, { value: "0.5", label: t("feat.wmOp05") },
       ] },
-      { id: "color", label: "Cor", type: "select", value: "cinza", span: 3, options: [
-        { value: "cinza", label: "Cinza" }, { value: "vermelho", label: "Vermelho" }, { value: "azul", label: "Azul" },
+      { id: "color", label: t("feat.color"), type: "select", value: "cinza", span: 3, options: [
+        { value: "cinza", label: t("feat.colorGray") }, { value: "vermelho", label: t("feat.colorRed") }, { value: "azul", label: t("feat.colorBlue") },
       ] },
-      { id: "layer", label: "Posição", type: "select", value: "over", span: 3, options: [
-        { value: "over", label: "Por cima do conteúdo" }, { value: "behind", label: "Por baixo (some sob imagens)" },
+      { id: "layer", label: t("feat.wmLayer"), type: "select", value: "over", span: 3, options: [
+        { value: "over", label: t("feat.wmOver") }, { value: "behind", label: t("feat.wmBehind") },
       ] },
     ],
-    validate: (f) => (String(f.text).trim() ? null : "Digite o texto da marca d'água."),
+    validate: (f) => (String(f.text).trim() ? null : t("feat.wmTextErr")),
   });
   if (!v) return;
-  await a.mutate("Aplicando marca d'água…", () => engine.addWatermark({
+  await a.mutate(t("feat.wmBusy"), () => engine.addWatermark({
     text: String(v.text).trim(), angle: Number(v.angle), opacity: Number(v.opacity),
     color: WM_COLORS[String(v.color)] ?? WM_COLORS.cinza, behind: v.layer === "behind",
   }));
@@ -221,26 +260,29 @@ export async function watermark(a: App): Promise<void> {
 const STAMP_NAME = "papiro.stampName";
 
 export async function chooseStamp(a: App): Promise<void> {
+  const { t, lang } = a;
+  const presets = stampPresets(lang);
   let name = "";
   try { name = localStorage.getItem(STAMP_NAME) ?? ""; } catch { /* sem armazenamento */ }
   const v = await a.askForm({
-    title: "Carimbo", okLabel: "Usar carimbo",
-    message: "Depois de escolher, clique na página onde o carimbo deve ficar.",
+    title: t("feat.stampTitle"), okLabel: t("feat.stampOk"),
+    message: t("feat.stampMsg"),
     fields: [
-      { id: "preset", label: "Modelo", type: "select", value: "aprovado", span: 3,
-        options: [...STAMP_PRESETS.map((p) => ({ value: p.id, label: p.text })), { value: "custom", label: "Outro texto…" }] },
-      { id: "custom", label: "Texto do carimbo", type: "text", value: "", span: 3, showIf: (f) => f.preset === "custom" },
-      { id: "date", label: "Incluir a data de hoje", type: "checkbox", value: true, span: 3 },
-      { id: "name", label: "Nome (opcional)", type: "text", value: name, span: 3, placeholder: "ex.: Maria Silva" },
+      { id: "preset", label: t("feat.stampModel"), type: "select", value: "aprovado", span: 3,
+        options: [...presets.map((p) => ({ value: p.id, label: p.text })), { value: "custom", label: t("feat.otherText") }] },
+      { id: "custom", label: t("feat.stampCustom"), type: "text", value: "", span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "date", label: t("feat.stampDate"), type: "checkbox", value: true, span: 3 },
+      { id: "name", label: t("feat.stampName"), type: "text", value: name, span: 3, placeholder: t("feat.stampNamePh") },
     ],
-    validate: (f) => (f.preset === "custom" && !String(f.custom).trim() ? "Digite o texto do carimbo." : null),
+    validate: (f) => (f.preset === "custom" && !String(f.custom).trim() ? t("feat.stampErr") : null),
   });
   if (!v) return;
-  const preset = STAMP_PRESETS.find((p) => p.id === v.preset);
-  const text = (preset?.text ?? String(v.custom).trim()).toLocaleUpperCase("pt-BR").slice(0, 40);
+  const preset = presets.find((p) => p.id === v.preset);
+  const tag = localeTag(lang);
+  const text = (preset?.text ?? String(v.custom).trim()).toLocaleUpperCase(tag).slice(0, 40);
   const who = String(v.name).trim();
   try { localStorage.setItem(STAMP_NAME, who); } catch { /* sem armazenamento */ }
-  const sub = [v.date ? new Date().toLocaleDateString("pt-BR") : "", who].filter(Boolean).join(" · ");
+  const sub = [v.date ? new Date().toLocaleDateString(tag) : "", who].filter(Boolean).join(" · ");
   a.setStamp(makeStamp(text, preset?.color ?? "#1f5fbf", sub));
   a.setView("read");
   a.setTool("stamp");
@@ -249,21 +291,22 @@ export async function chooseStamp(a: App): Promise<void> {
 // ---------- exportar páginas como imagem ----------
 
 export async function exportImages(a: App): Promise<void> {
+  const { t } = a;
   const n = a.doc!.info.pageCount;
   const sel = a.view === "organize" && a.selectedPages.length ? [...a.selectedPages].sort((x, y) => x - y) : null;
   const v = await a.askForm({
-    title: "Exportar como imagem", okLabel: "Exportar…",
+    title: t("feat.expImgTitle"), okLabel: t("feat.expImgOk"),
     fields: [
-      { id: "which", label: "Páginas", type: "select", value: sel ? "sel" : "cur", options: [
-        { value: "cur", label: `Página atual (${a.page + 1})` },
-        ...(sel ? [{ value: "sel", label: `Páginas selecionadas (${sel.length})` }] : []),
-        ...(n > 1 ? [{ value: "all", label: `Todas as ${n} páginas (um arquivo por página)` }] : []),
+      { id: "which", label: t("feat.whichPages"), type: "select", value: sel ? "sel" : "cur", options: [
+        { value: "cur", label: t("feat.curPage", { n: a.page + 1 }) },
+        ...(sel ? [{ value: "sel", label: t("feat.selPages", { n: sel.length }) }] : []),
+        ...(n > 1 ? [{ value: "all", label: t("feat.allPagesFiles", { n }) }] : []),
       ] },
-      { id: "fmt", label: "Formato", type: "select", value: "png", span: 3, options: [
-        { value: "png", label: "PNG (texto nítido)" }, { value: "jpg", label: "JPEG (menor, bom para fotos)" },
+      { id: "fmt", label: t("feat.format"), type: "select", value: "png", span: 3, options: [
+        { value: "png", label: t("feat.fmtPng") }, { value: "jpg", label: t("feat.fmtJpg") },
       ] },
-      { id: "dpi", label: "Resolução", type: "select", value: "150", span: 3, options: [
-        { value: "96", label: "96 dpi (tela)" }, { value: "150", label: "150 dpi (boa)" }, { value: "300", label: "300 dpi (impressão)" },
+      { id: "dpi", label: t("feat.dpi"), type: "select", value: "150", span: 3, options: [
+        { value: "96", label: t("feat.dpi96") }, { value: "150", label: t("feat.dpi150") }, { value: "300", label: t("feat.dpi300") },
       ] },
     ],
   });
@@ -273,83 +316,80 @@ export async function exportImages(a: App): Promise<void> {
   if (pages.length === 1) {
     const path = await window.papiro.saveDialog(`${base(a)}_p${pages[0] + 1}.${fmt}`, fmt);
     if (!path) return;
-    await a.task("Exportando…", async () => {
+    await a.task(t("feat.exporting"), async () => {
       await window.papiro.writeFile(path, await engine.pageImage(pages[0], dpi, fmt));
-      a.notify(`Página ${pages[0] + 1} salva em ${path}`);
+      a.notify(t("feat.expImgOneDone", { n: pages[0] + 1, path }));
     });
     return;
   }
   const dir = await window.papiro.folderDialog();
   if (!dir) return;
-  await a.task("Exportando imagens…", async () => {
+  await a.task(t("feat.expImgManyBusy"), async () => {
     const out = await engine.exportImages(dir, base(a), pages, dpi, fmt);
-    a.notify(`${out.length} imagens gravadas em ${dir} (${fileName(out[0])} …)`);
+    a.notify(t("feat.expImgManyDone", { n: out.length, dir, first: fileName(out[0]) }));
   });
 }
 
 // ---------- converter ----------
 
-/** Converte o documento para Word (.docx): texto com fonte, tamanho e cor, parágrafos e imagens. */
 export async function toWord(a: App): Promise<void> {
+  const { t } = a;
   if (a.scanned.length === a.doc!.info.pageCount) {
     const ok = await a.ask({
-      kind: "confirm", title: "Converter para Word", okLabel: "Converter assim mesmo",
-      message: "Este documento parece escaneado: no Word, cada página vira uma imagem. Para ter texto editável, use antes Reconhecer texto (OCR).",
+      kind: "confirm", title: t("feat.toWordTitle"), okLabel: t("feat.toWordOk"),
+      message: t("feat.toWordScanMsg"),
     });
     if (ok === null) return;
   }
   const path = await window.papiro.saveDialog(`${base(a)}.docx`, "docx");
   if (!path) return;
-  await a.task("Convertendo para Word…", async () => {
+  await a.task(t("feat.toWordBusy"), async () => {
     const bytes = await engine.saveDocx(path);
-    a.notify(`Documento do Word salvo em ${path} (${size(bytes)}).`);
+    a.notify(t("feat.toWordDone", { path, size: size(bytes, a) }));
   });
 }
 
-/** Converte o documento para texto puro (.txt). */
 export async function toText(a: App): Promise<void> {
+  const { t } = a;
   const path = await window.papiro.saveDialog(`${base(a)}.txt`, "txt");
   if (!path) return;
-  await a.task("Convertendo para texto…", async () => {
+  await a.task(t("feat.toTextBusy"), async () => {
     const chars = await engine.saveText(path);
-    a.notify(chars > 2 ? `Texto salvo em ${path}.` : `Arquivo salvo em ${path}, mas o documento quase não tem texto (é escaneado? use o OCR antes).`);
+    a.notify(chars > 2 ? t("feat.toTextDone", { path }) : t("feat.toTextEmpty", { path }));
   });
 }
 
 // ---------- remover marca d'água ----------
 
-/** Tira as marcas d'água reconhecidas de todas as páginas (dá para desfazer). */
 export async function removeWatermarks(a: App): Promise<void> {
-  const r = await a.task("Procurando marcas d'água…", () => engine.removeWatermarks());
+  const { t } = a;
+  const r = await a.task(t("feat.remWmBusy"), () => engine.removeWatermarks());
   if (!r) return;
-  if (!r.removed) {
-    a.notify("Nenhuma marca d'água reconhecida. Se for um carimbo, clique nele com Selecionar e exclua; se fizer parte de uma página escaneada, cubra com a redação.");
-    return;
-  }
+  if (!r.removed) { a.notify(t("feat.remWmNone")); return; }
   await a.mutate("…", async () => r.info);
-  a.notify(`Marca d'água removida de ${r.pages} página(s). Ctrl+Z desfaz.`);
+  a.notify(t("feat.remWmDone", { n: r.pages }));
 }
 
 // ---------- planilha CSV ----------
 
-/** Extrai tabelas e dados tabulares para CSV (separador `;`, pronto para abrir no Excel). */
 export async function toCsv(a: App): Promise<void> {
+  const { t } = a;
   const path = await window.papiro.saveDialog(`${base(a)}.csv`, "csv");
   if (!path) return;
-  await a.task("Extraindo planilha…", async () => {
+  await a.task(t("feat.toCsvBusy"), async () => {
     const chars = await engine.saveCsv(path);
-    a.notify(chars > 2 ? `Planilha CSV salva em ${path}.` : `Arquivo salvo em ${path}, mas quase não há texto (use OCR antes se for escaneado).`);
+    a.notify(chars > 2 ? t("feat.toCsvDone", { path }) : t("feat.toCsvEmpty", { path }));
   });
 }
 
 // ---------- imagem sobre a página ----------
 
-/** Escolhe uma imagem (logo, foto, selo) para colar diretamente sobre uma página existente. */
 export async function chooseOverlayImage(a: App): Promise<void> {
-  const [f] = await window.papiro.openDialog({ title: "Escolher imagem para inserir na página", images: true });
+  const { t } = a;
+  const [f] = await window.papiro.openDialog({ title: t("feat.overlayTitle"), images: true });
   if (!f) return;
-  await a.task("Preparando imagem…", async () => {
-    const [bytes] = await prepareImages([f]);
+  await a.task(t("feat.overlayBusy"), async () => {
+    const [bytes] = await prepareImages([f], a.lang);
     const url = URL.createObjectURL(new Blob([bytes as BlobPart]));
     const img = new Image();
     img.src = url;
@@ -357,7 +397,7 @@ export async function chooseOverlayImage(a: App): Promise<void> {
     a.setOverlayImg({ bytes, width: img.naturalWidth || 200, height: img.naturalHeight || 200, name: f.name });
     a.setView("read");
     a.setTool("overlayimg");
-    a.notify(`Imagem “${f.name}” pronta: clique ou arraste na página para posicionar.`);
+    a.notify(t("feat.overlayReady", { name: f.name }));
   });
 }
 
@@ -366,155 +406,530 @@ export async function chooseOverlayImage(a: App): Promise<void> {
 const MM_TO_PT = 72 / 25.4;
 
 export async function cropPages(a: App): Promise<void> {
+  const { t } = a;
   const sel = a.view === "organize" && a.selectedPages.length ? [...a.selectedPages].sort((x, y) => x - y) : null;
   const n = a.doc!.info.pageCount;
   const v = await a.askForm({
-    title: "Recortar margens da página", okLabel: "Recortar",
-    message: "Informe quanto cortar de cada borda (em milímetros). Ideal para remover bordas pretas de digitalizações. Ctrl+Z desfaz.",
+    title: t("feat.cropTitle"), okLabel: t("feat.cropOk"),
+    message: t("feat.cropMsg"),
     fields: [
-      { id: "which", label: "Aplicar em", type: "select", value: sel ? "sel" : "cur", options: [
-        { value: "cur", label: `Página atual (${a.page + 1})` },
-        ...(sel ? [{ value: "sel", label: `Páginas selecionadas (${sel.length})` }] : []),
-        ...(n > 1 ? [{ value: "all", label: `Todas as ${n} páginas` }] : []),
+      { id: "which", label: t("feat.applyTo"), type: "select", value: sel ? "sel" : "cur", options: [
+        { value: "cur", label: t("feat.curPage", { n: a.page + 1 }) },
+        ...(sel ? [{ value: "sel", label: t("feat.selPages", { n: sel.length }) }] : []),
+        ...(n > 1 ? [{ value: "all", label: t("feat.allPagesSimple", { n }) }] : []),
       ] },
-      { id: "top", label: "Topo (mm)", type: "number", value: "10", span: 3 },
-      { id: "bottom", label: "Base (mm)", type: "number", value: "10", span: 3 },
-      { id: "left", label: "Esquerda (mm)", type: "number", value: "10", span: 3 },
-      { id: "right", label: "Direita (mm)", type: "number", value: "10", span: 3 },
+      { id: "top", label: t("feat.cropTop"), type: "number", value: "10", span: 3 },
+      { id: "bottom", label: t("feat.cropBottom"), type: "number", value: "10", span: 3 },
+      { id: "left", label: t("feat.cropLeft"), type: "number", value: "10", span: 3 },
+      { id: "right", label: t("feat.cropRight"), type: "number", value: "10", span: 3 },
     ],
     validate: (f) => {
       const vals = ["top", "bottom", "left", "right"].map((k) => Number(String(f[k]).replace(",", ".")));
-      if (vals.some((x) => Number.isNaN(x) || x < 0 || x > 200)) return "Informe valores entre 0 e 200 mm.";
-      if (vals.every((x) => x === 0)) return "Informe pelo menos uma margem maior que zero.";
+      if (vals.some((x) => Number.isNaN(x) || x < 0 || x > 200)) return t("feat.cropErrRange");
+      if (vals.every((x) => x === 0)) return t("feat.cropErrZero");
       return null;
     },
   });
   if (!v) return;
   const pages = v.which === "all" ? allPages(a) : v.which === "sel" && sel ? sel : [a.page];
   const mm = (k: string) => Number(String(v[k]).replace(",", ".")) * MM_TO_PT;
-  const ok = await a.mutate("Recortando…", () => engine.cropPages(pages, {
+  const ok = await a.mutate(t("feat.cropBusy"), () => engine.cropPages(pages, {
     top: mm("top"), right: mm("right"), bottom: mm("bottom"), left: mm("left"),
   }));
-  if (ok) a.notify(`Recorte aplicado em ${pages.length} página(s). Ctrl+Z desfaz.`);
+  if (ok) a.notify(t("feat.cropDone", { n: pages.length }));
 }
 
 export async function normalizeSizes(a: App): Promise<void> {
+  const { t } = a;
   const sel = a.view === "organize" && a.selectedPages.length ? [...a.selectedPages].sort((x, y) => x - y) : null;
   const n = a.doc!.info.pageCount;
   const v = await a.askForm({
-    title: "Padronizar tamanho das páginas", okLabel: "Padronizar",
-    message: "Ajusta e centraliza o conteúdo mantendo a orientação (retrato ou paisagem) de cada página.",
+    title: t("feat.normTitle"), okLabel: t("feat.normOk"),
+    message: t("feat.normMsg"),
     fields: [
-      { id: "target", label: "Tamanho padrão", type: "select", value: "A4", span: 3, options: [
-        { value: "A4", label: "A4 (210 × 297 mm)" },
-        { value: "Carta", label: "Carta (216 × 279 mm)" },
+      { id: "target", label: t("feat.normTarget"), type: "select", value: "A4", span: 3, options: [
+        { value: "A4", label: t("feat.sizeA4") },
+        { value: "Carta", label: t("feat.sizeLetter") },
       ] },
-      { id: "which", label: "Aplicar em", type: "select", value: "all", span: 3, options: [
-        { value: "all", label: `Todas as ${n} páginas` },
-        ...(sel ? [{ value: "sel", label: `Selecionadas (${sel.length})` }] : []),
-        { value: "cur", label: `Apenas página ${a.page + 1}` },
+      { id: "which", label: t("feat.applyTo"), type: "select", value: "all", span: 3, options: [
+        { value: "all", label: t("feat.allPagesSimple", { n }) },
+        ...(sel ? [{ value: "sel", label: t("feat.selShort", { n: sel.length }) }] : []),
+        { value: "cur", label: t("feat.onlyPage", { n: a.page + 1 }) },
       ] },
     ],
   });
   if (!v) return;
   const pages = v.which === "cur" ? [a.page] : v.which === "sel" && sel ? sel : allPages(a);
   const target = v.target as "A4" | "Carta";
-  const ok = await a.mutate("Padronizando páginas…", () => engine.normalizePageSizes(pages, target));
-  if (ok) a.notify(`${pages.length} página(s) padronizada(s) para ${target}. Ctrl+Z desfaz.`);
+  const ok = await a.mutate(t("feat.normBusy"), () => engine.normalizePageSizes(pages, target));
+  if (ok) a.notify(t("feat.normDone", { n: pages.length, target: target === "A4" ? "A4" : t("state.imgOptLetter") }));
 }
 
 // ---------- achatar e limpar metadados ----------
 
 export async function flattenPdf(a: App): Promise<void> {
+  const { t } = a;
   const ok = await a.ask({
-    kind: "confirm", title: "Achatar PDF", okLabel: "Achatar",
-    message: "Transforma todas as anotações, assinaturas, carimbos e campos preenchidos em conteúdo fixo da página. Eles não poderão mais ser movidos ou editados como anotações (Ctrl+Z desfaz antes de salvar).",
+    kind: "confirm", title: t("feat.flatTitle"), okLabel: t("feat.flatOk"),
+    message: t("feat.flatMsg"),
   });
   if (ok === null) return;
-  const r = await a.task("Achatando PDF…", () => engine.flatten());
+  const r = await a.task(t("feat.flatBusy"), () => engine.flatten());
   if (!r) return;
-  if (!r.count) { a.notify("Não há anotações nem campos de formulário para achatar."); return; }
+  if (!r.count) { a.notify(t("feat.flatNone")); return; }
   await a.mutate("…", async () => r.info);
-  a.notify(`${r.count} anotação(ões)/campo(s) achatado(s) no conteúdo da página.`);
+  a.notify(t("feat.flatDone", { n: r.count }));
 }
 
 export async function sanitizeMetadata(a: App): Promise<void> {
+  const { t } = a;
   const ok = await a.ask({
-    kind: "confirm", title: "Limpar metadados ocultos", okLabel: "Limpar metadados",
-    message: "Remove autor, programa criador, datas, assunto, palavras-chave e fluxos XML (XMP) ocultos do PDF antes de compartilhar.",
+    kind: "confirm", title: t("feat.sanitTitle"), okLabel: t("feat.sanitOk"),
+    message: t("feat.sanitMsg"),
   });
   if (ok === null) return;
-  const r = await a.task("Limpando metadados…", () => engine.sanitizeMetadata());
+  const r = await a.task(t("feat.sanitBusy"), () => engine.sanitizeMetadata());
   if (!r) return;
   await a.mutate("…", async () => r.info);
-  a.notify(r.removed ? `${r.removed} item(ns) de metadados removidos. Salve para gravar o arquivo limpo.` : "O documento já não continha metadados ocultos.");
+  a.notify(r.removed ? t("feat.sanitDone", { n: r.removed }) : t("feat.sanitNone"));
 }
 
 // ---------- comparar dois PDFs ----------
 
 export async function comparePdf(a: App): Promise<void> {
-  const [f] = await window.papiro.openDialog({ title: "Escolher o segundo PDF para comparar" });
+  const { t } = a;
+  const [f] = await window.papiro.openDialog({ title: t("feat.compareOpen") });
   if (!f) return;
-  const report = await a.task(`Comparando com ${f.name}…`, () => engine.comparePdf(f.bytes, f.name));
+  const report = await a.task(t("feat.compareBusy", { name: f.name }), () => engine.comparePdf(f.bytes, f.name));
   if (report) a.setCompareReport(report);
 }
 
-// ---------- ações em lote ----------
+// ---------- ações em lote (pipeline multi-etapas / Assistente de Ações) ----------
 
 export async function batchProcess(a: App): Promise<void> {
-  const files = await window.papiro.openDialog({ title: "Escolher os PDFs para processar em lote", multi: true });
+  const { t } = a;
+  const files = await window.papiro.openDialog({ title: t("feat.batchOpen"), multi: true });
   if (!files.length) return;
   const paths = files.map((f) => f.path).filter((p): p is string => !!p);
-  if (!paths.length) { a.notify("Selecione arquivos PDF salvos no disco."); return; }
+  if (!paths.length) { a.notify(t("feat.batchNeedDisk")); return; }
   const v = await a.askForm({
-    title: `Ações em lote (${paths.length} arquivo${paths.length > 1 ? "s" : ""})`,
-    okLabel: "Escolher pasta e executar…",
-    message: "Os arquivos originais não são sobrescritos: cada PDF processado será salvo na pasta de destino escolhida.",
+    title: t("feat.batchTitle", { n: paths.length }),
+    okLabel: t("feat.batchOk"),
+    message: t("feat.batchMsg"),
     fields: [
-      { id: "kind", label: "Ação", type: "select", value: "compress", options: [
-        { value: "compress", label: "Comprimir PDFs" },
-        { value: "watermark", label: "Adicionar marca d'água" },
-        { value: "number", label: "Numerar páginas" },
-        { value: "sanitize", label: "Limpar metadados ocultos" },
-        { value: "flatten", label: "Achatar anotações e formulários" },
-        { value: "ocr", label: "Reconhecer texto (OCR nas páginas escaneadas)" },
+      { id: "preset", label: t("feat.batchPreset"), type: "select", value: "custom", options: [
+        { value: "custom", label: t("feat.batchPresetCustom") },
+        { value: "send", label: t("feat.batchPresetSend") },
+        { value: "protocol", label: t("feat.batchPresetProtocol") },
+        { value: "lgpd", label: t("feat.batchPresetLgpd") },
       ] },
-      { id: "level", label: "Nível de compressão", type: "select", value: "media", showIf: (f) => f.kind === "compress", options: [
-        { value: "leve", label: "Leve" }, { value: "media", label: "Média" }, { value: "forte", label: "Forte" },
-      ] },
-      { id: "wmText", label: "Texto da marca d'água", type: "text", value: "CONFIDENCIAL", showIf: (f) => f.kind === "watermark" },
-      { id: "numFmt", label: "Formato da numeração", type: "select", value: "Página {p} de {n}", showIf: (f) => f.kind === "number", options: [
-        { value: "{p}", label: "1" }, { value: "Página {p}", label: "Página 1" }, { value: "Página {p} de {n}", label: "Página 1 de 10" },
-      ] },
-      { id: "langs", label: "Idioma do OCR", type: "select", value: a.ocrLang, showIf: (f) => f.kind === "ocr", options: OCR_LANGS },
+      { id: "doOcr", label: t("feat.batchStep1"), type: "checkbox", value: false, span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "doNorm", label: t("feat.batchStep2"), type: "checkbox", value: false, span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "doLgpd", label: t("feat.batchStep3"), type: "checkbox", value: false, span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "doSanitize", label: t("feat.batchStep4"), type: "checkbox", value: false, span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "doFlatten", label: t("feat.batchStep5"), type: "checkbox", value: false, span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "doWm", label: t("feat.batchStep6"), type: "checkbox", value: false, span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "doNum", label: t("feat.batchStep7"), type: "checkbox", value: false, span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "doBates", label: t("feat.batchStep8"), type: "checkbox", value: false, span: 3, showIf: (f) => f.preset === "custom" },
+      { id: "doCompress", label: t("feat.batchStep9"), type: "checkbox", value: true, span: 6, showIf: (f) => f.preset === "custom" },
+      { id: "langs", label: t("feat.batchOcrLang"), type: "select", value: a.ocrLang, span: 3,
+        showIf: (f) => f.preset === "protocol" || (f.preset === "custom" && !!f.doOcr), options: ocrLangOptions(a.lang) },
+      { id: "batesPrefix", label: t("feat.batchBatesPrefix"), type: "text", value: "PROC-", span: 3,
+        showIf: (f) => f.preset === "protocol" || (f.preset === "custom" && !!f.doBates) },
+      { id: "batesStart", label: t("feat.batchBatesStart"), type: "number", value: "1", span: 3,
+        showIf: (f) => f.preset === "protocol" || (f.preset === "custom" && !!f.doBates) },
+      { id: "wmText", label: t("feat.batchWmText"), type: "text", value: t("feat.wmDefault"), span: 3,
+        showIf: (f) => f.preset === "custom" && !!f.doWm },
+      { id: "numFmt", label: t("feat.batchNumFmt"), type: "select", value: t("feat.numFmtOf"), span: 3,
+        showIf: (f) => f.preset === "custom" && !!f.doNum, options: [
+          { value: "{p}", label: "1" }, { value: t("feat.numFmtPage"), label: t("feat.numFmtPageLbl") }, { value: t("feat.numFmtOf"), label: t("feat.numFmtOfLbl") },
+        ] },
+      { id: "level", label: t("feat.batchLevel"), type: "select", value: "media", span: 3,
+        showIf: (f) => f.preset !== "custom" || !!f.doCompress, options: [
+          { value: "leve", label: t("feat.lvlLight") }, { value: "media", label: t("feat.lvlMed") }, { value: "forte", label: t("feat.lvlStrong") },
+        ] },
     ],
-    validate: (f) => (f.kind === "watermark" && !String(f.wmText).trim() ? "Digite o texto da marca d'água." : null),
+    validate: (f) => {
+      if (f.preset === "custom") {
+        const any = !!(f.doOcr || f.doNorm || f.doLgpd || f.doSanitize || f.doFlatten || f.doWm || f.doNum || f.doBates || f.doCompress);
+        if (!any) return t("feat.batchErrNoStep");
+        if (f.doWm && !String(f.wmText).trim()) return t("feat.wmTextErr");
+      }
+      if ((f.preset === "protocol" || (f.preset === "custom" && f.doBates)) && !/^\d{1,9}$/.test(String(f.batesStart).trim())) {
+        return t("feat.batchErrBates");
+      }
+      return null;
+    },
   });
   if (!v) return;
   const outDir = await window.papiro.folderDialog();
   if (!outDir) return;
-  let action: BatchAction;
-  switch (v.kind) {
-    case "compress": action = { kind: "compress", level: v.level as "leve" | "media" | "forte" }; break;
-    case "watermark": action = { kind: "watermark", text: String(v.wmText).trim() }; break;
-    case "number": action = { kind: "number", fmt: String(v.numFmt), pos: "bc" }; break;
-    case "sanitize": action = { kind: "sanitize" }; break;
-    case "flatten": action = { kind: "flatten" }; break;
-    default: action = { kind: "ocr", langs: String(v.langs) }; break;
+
+  const actions: BatchAction[] = [];
+  const lvl = v.level as "leve" | "media" | "forte";
+  if (v.preset === "send") {
+    actions.push({ kind: "sanitize" }, { kind: "flatten" }, { kind: "compress", level: lvl });
+  } else if (v.preset === "protocol") {
+    actions.push(
+      { kind: "ocr", langs: String(v.langs) },
+      { kind: "normalize", target: "A4" },
+      { kind: "bates", prefix: String(v.batesPrefix), startNumber: Number(String(v.batesStart).trim()), digits: 6, pos: "br", continuous: true },
+      { kind: "compress", level: lvl },
+    );
+  } else if (v.preset === "lgpd") {
+    actions.push(
+      { kind: "redactPatterns", patterns: ["cpf", "cnpj", "email"], overlayText: "LGPD" },
+      { kind: "sanitize" },
+      { kind: "compress", level: lvl },
+    );
+  } else {
+    if (v.doOcr) actions.push({ kind: "ocr", langs: String(v.langs) });
+    if (v.doNorm) actions.push({ kind: "normalize", target: "A4" });
+    if (v.doLgpd) actions.push({ kind: "redactPatterns", patterns: ["cpf", "cnpj", "email"], overlayText: "LGPD" });
+    if (v.doSanitize) actions.push({ kind: "sanitize" });
+    if (v.doFlatten) actions.push({ kind: "flatten" });
+    if (v.doWm) actions.push({ kind: "watermark", text: String(v.wmText).trim() });
+    if (v.doNum) actions.push({ kind: "number", fmt: String(v.numFmt), pos: "bc" });
+    if (v.doBates) actions.push({ kind: "bates", prefix: String(v.batesPrefix), startNumber: Number(String(v.batesStart).trim()), digits: 6, pos: "br", continuous: true });
+    if (v.doCompress) actions.push({ kind: "compress", level: lvl });
   }
-  const r = await a.task(`Processando ${paths.length} arquivo(s)…`, () => engine.batchProcess(paths, outDir, action));
+
+  const r = await a.task(t("feat.batchBusy", { steps: actions.length, files: paths.length }), () => engine.batchProcess(paths, outDir, actions));
   if (!r) return;
-  const errNote = r.failed.length ? ` (${r.failed.length} falhou: ${r.failed[0].file} — ${r.failed[0].error})` : "";
-  a.notify(`Lote concluído: ${r.processed}/${paths.length} arquivo(s) gravado(s) em ${outDir}${errNote}.`);
+  const bates = r.batesEnd !== undefined ? t("feat.batchBatesNote", { end: r.batesEnd }) : "";
+  const err = r.failed.length ? t("feat.batchErrNote", { n: r.failed.length, file: r.failed[0].file, err: r.failed[0].error }) : "";
+  a.notify(t("feat.batchDone", { ok: r.processed, total: paths.length, dir: outDir, bates, err }));
+}
+
+// ---------- redação inteligente (LGPD e padrões) ----------
+
+export async function smartRedact(a: App): Promise<void> {
+  const { t } = a;
+  const v = await a.askForm({
+    title: t("feat.sredTitle"), okLabel: t("feat.sredOk"),
+    message: t("feat.sredMsg"),
+    fields: [
+      { id: "cpf", label: "CPF", type: "checkbox", value: true, span: 2 },
+      { id: "cnpj", label: "CNPJ", type: "checkbox", value: true, span: 2 },
+      { id: "email", label: t("feat.sredEmail"), type: "checkbox", value: true, span: 2 },
+      { id: "phone", label: t("feat.sredPhone"), type: "checkbox", value: false, span: 2 },
+      { id: "cep", label: "CEP", type: "checkbox", value: false, span: 2 },
+      { id: "rg", label: "RG", type: "checkbox", value: false, span: 2 },
+      { id: "card", label: t("feat.sredCard"), type: "checkbox", value: false, span: 3 },
+      { id: "applyNow", label: t("feat.sredApplyNow"), type: "checkbox", value: false, span: 3 },
+      { id: "custom", label: t("feat.sredCustom"), type: "text", value: "", span: 3, placeholder: t("feat.sredCustomPh") },
+      { id: "isRegex", label: t("feat.sredRegex"), type: "checkbox", value: false, span: 3 },
+      { id: "overlayPreset", label: t("feat.sredOverlay"), type: "select", value: "LGPD", span: 3, options: [
+        { value: "", label: t("feat.sredOverlayNone") },
+        { value: "LGPD", label: "LGPD" },
+        { value: "{tipo}", label: t("feat.sredOverlayType") },
+        { value: t("feat.wmDefault"), label: t("feat.wmDefault") },
+        { value: "custom", label: t("feat.otherText") },
+      ] },
+      { id: "overlayCustom", label: t("feat.sredOverlayCustom"), type: "text", value: "", span: 3,
+        showIf: (f) => f.overlayPreset === "custom", placeholder: t("feat.sredOverlayCustomPh") },
+    ],
+    validate: (f) => {
+      const anyPat = !!(f.cpf || f.cnpj || f.email || f.phone || f.cep || f.rg || f.card);
+      if (!anyPat && !String(f.custom).trim()) return t("feat.sredErrEmpty");
+      return null;
+    },
+  });
+  if (!v) return;
+  const patterns = (["cpf", "cnpj", "email", "phone", "cep", "rg", "card"] as RedactPatternId[]).filter((k) => !!v[k]);
+  const overlayText = v.overlayPreset === "custom" ? String(v.overlayCustom).trim() : String(v.overlayPreset);
+  const res = await a.task(t("feat.sredBusy"), () => engine.redactByPatterns({
+    patterns,
+    customQuery: String(v.custom).trim() || undefined,
+    isRegex: !!v.isRegex,
+    overlayText: overlayText || undefined,
+  }));
+  if (!res) return;
+  if (!res.marked) { a.notify(t("feat.sredNone")); return; }
+  await a.mutate("…", async () => res.info);
+  const summary = Object.entries(res.byLabel).map(([k, n]) => `${k}: ${n}`).join(" · ");
+  if (v.applyNow) {
+    const applied = await a.task(t("feat.sredApplying"), () => engine.applyAllRedactions());
+    if (applied) {
+      await a.mutate("…", async () => applied.info);
+      a.notify(t("feat.sredApplied", { marked: res.marked, pages: applied.pages, summary }));
+    }
+    return;
+  }
+  a.setView("read");
+  a.setTool("redact");
+  a.notify(t("feat.sredMarked", { marked: res.marked, pages: res.pages, summary }));
+}
+
+// ---------- numeração Bates ----------
+
+export async function batesNumbering(a: App): Promise<void> {
+  const { t } = a;
+  const v = await a.askForm({
+    title: t("feat.batesTitle"), okLabel: t("feat.batesOk"),
+    message: t("feat.batesMsg"),
+    fields: [
+      { id: "prefix", label: t("feat.batesPrefix"), type: "text", value: "PROC-", span: 2, placeholder: t("feat.batesPrefixPh") },
+      { id: "start", label: t("feat.batesStart"), type: "number", value: "1", span: 2 },
+      { id: "digits", label: t("feat.batesDigits"), type: "select", value: "6", span: 2, options: [
+        { value: "4", label: "4 (0001)" }, { value: "5", label: "5 (00001)" },
+        { value: "6", label: "6 (000001)" }, { value: "8", label: "8 (00000001)" },
+      ] },
+      { id: "suffix", label: t("feat.batesSuffix"), type: "text", value: "", span: 3, placeholder: t("feat.batesSuffixPh") },
+      { id: "pos", label: t("feat.pos"), type: "select", value: "br", span: 3, options: [
+        { value: "br", label: t("feat.posBr") }, { value: "bc", label: t("feat.posBc") }, { value: "bl", label: t("feat.posBl") },
+        { value: "tr", label: t("feat.posTr") }, { value: "tc", label: t("feat.posTc") }, { value: "tl", label: t("feat.posTl") },
+      ] },
+      { id: "size", label: t("feat.size"), type: "select", value: "10", options: SIZES, span: 3 },
+      { id: "skip", label: t("feat.batesSkipCover"), type: "checkbox", value: false, span: 3 },
+    ],
+    validate: (f) => (/^\d{1,9}$/.test(String(f.start).trim()) ? null : t("feat.batesStartErr")),
+  });
+  if (!v) return;
+  const skip = !!v.skip && a.doc!.info.pageCount > 1;
+  const start = Number(String(v.start).trim());
+  const digits = Number(v.digits);
+  const res = await a.task(t("feat.batesBusy"), () => engine.addBatesNumbering({
+    prefix: String(v.prefix),
+    suffix: String(v.suffix),
+    startNumber: start,
+    digits,
+    pos: v.pos as MarginPos,
+    size: Number(v.size),
+    pages: skip ? allPages(a).slice(1) : undefined,
+  }));
+  if (!res) return;
+  await a.mutate("…", async () => res.info);
+  const first = `${v.prefix}${String(start).padStart(digits, "0")}${v.suffix}`;
+  const last = `${v.prefix}${String(res.nextNumber - 1).padStart(digits, "0")}${v.suffix}`;
+  a.notify(t("feat.batesDone", { first, last }));
+}
+
+// ---------- rótulos de página (/PageLabels) ----------
+
+function labelStyles(a: App): { value: PageLabelStyle; label: string }[] {
+  const { t } = a;
+  return [
+    { value: "D", label: t("feat.plblStyleD") },
+    { value: "r", label: t("feat.plblStyler") },
+    { value: "R", label: t("feat.plblStyleR") },
+    { value: "a", label: t("feat.plblStylea") },
+    { value: "A", label: t("feat.plblStyleA") },
+    { value: "none", label: t("feat.plblStyleNone") },
+  ];
+}
+
+export async function pageLabels(a: App): Promise<void> {
+  const { t } = a;
+  const total = a.doc!.info.pageCount;
+  const styles = labelStyles(a);
+  const v = await a.askForm({
+    title: t("feat.plblTitle"), okLabel: t("feat.plblOk"),
+    message: t("feat.plblMsg"),
+    fields: [
+      { id: "mode", label: t("feat.plblScheme"), type: "select", value: "front", options: [
+        { value: "front", label: t("feat.plblFrontBody") },
+        { value: "single", label: t("feat.plblSingle") },
+        { value: "clear", label: t("feat.plblClear") },
+      ] },
+      { id: "frontStyle", label: t("feat.plblFrontStyle"), type: "select", value: "r", span: 3,
+        showIf: (f) => f.mode !== "clear", options: styles },
+      { id: "frontPrefix", label: t("feat.plblFrontPrefix"), type: "text", value: "", span: 3,
+        showIf: (f) => f.mode !== "clear", placeholder: t("feat.plblFrontPrefixPh") },
+      { id: "bodyPage", label: t("feat.plblBodyPage"), type: "number", value: String(Math.min(2, total)), span: 2,
+        showIf: (f) => f.mode === "front" },
+      { id: "bodyStyle", label: t("feat.plblBodyStyle"), type: "select", value: "D", span: 2,
+        showIf: (f) => f.mode === "front", options: styles },
+      { id: "bodyStart", label: t("feat.plblBodyStart"), type: "number", value: "1", span: 2,
+        showIf: (f) => f.mode === "front" },
+      { id: "bodyPrefix", label: t("feat.plblBodyPrefix"), type: "text", value: "", span: 6,
+        showIf: (f) => f.mode === "front", placeholder: t("feat.plblBodyPrefixPh") },
+    ],
+    validate: (f) => {
+      if (f.mode === "front") {
+        const bp = Number(String(f.bodyPage).trim());
+        if (!Number.isInteger(bp) || bp < 2 || bp > total) return t("feat.plblErrPage", { total });
+        const bs = Number(String(f.bodyStart).trim());
+        if (!Number.isInteger(bs) || bs < 1) return t("feat.plblErrStart");
+      }
+      return null;
+    },
+  });
+  if (!v) return;
+  if (v.mode === "clear") {
+    const ok = await a.mutate(t("feat.plblClearing"), () => engine.clearPageLabels());
+    if (ok) a.notify(t("feat.plblCleared"));
+    return;
+  }
+  const rules: PageLabelRule[] = [
+    { startPage: 0, style: v.frontStyle as PageLabelStyle, prefix: String(v.frontPrefix), startAt: 1 },
+  ];
+  if (v.mode === "front") {
+    rules.push({
+      startPage: Number(String(v.bodyPage).trim()) - 1,
+      style: v.bodyStyle as PageLabelStyle,
+      prefix: String(v.bodyPrefix),
+      startAt: Number(String(v.bodyStart).trim()),
+    });
+  }
+  const ok = await a.mutate(t("feat.plblBusy"), () => engine.setPageLabelRules(rules));
+  if (ok) a.notify(t("feat.plblDone"));
+}
+
+// ---------- exportar resumo de comentários ----------
+
+export async function exportComments(a: App): Promise<void> {
+  const { t } = a;
+  const v = await a.askForm({
+    title: t("feat.expComTitle"), okLabel: t("feat.expImgOk"),
+    message: t("feat.expComMsg"),
+    fields: [
+      { id: "fmt", label: t("feat.format"), type: "select", value: "pdf", options: [
+        { value: "pdf", label: t("feat.expComPdf") },
+        { value: "md", label: t("feat.expComMd") },
+        { value: "csv", label: t("feat.expComCsv") },
+      ] },
+    ],
+  });
+  if (!v) return;
+  const fmt = v.fmt as "pdf" | "md" | "csv";
+  const path = await window.papiro.saveDialog(`${base(a)}_${t("feat.expComSuffix")}.${fmt}`, fmt);
+  if (!path) return;
+  await a.task(t("feat.expComBusy"), async () => {
+    const bytes = await engine.saveCommentsSummary(path, fmt);
+    a.notify(t("feat.expComDone", { path, size: size(bytes, a) }));
+  });
 }
 
 // ---------- modo leitura ----------
 
 const MODES: ReadMode[] = ["normal", "sepia", "dark"];
-const MODE_LABEL: Record<ReadMode, string> = { normal: "Normal", sepia: "Sépia", dark: "Noturno" };
+const MODE_KEY: Record<ReadMode, I18nKey> = { normal: "feat.readNormal", sepia: "feat.readSepia", dark: "feat.readDark" };
 
 export function cycleReadMode(a: App): void {
   const next = MODES[(MODES.indexOf(a.readMode) + 1) % MODES.length];
   a.setReadMode(next);
-  a.notify(`Modo leitura: ${MODE_LABEL[next]}.`);
+  a.notify(a.t("feat.readNotify", { mode: a.t(MODE_KEY[next]) }));
+}
+
+// ---------- Tier 2: HTML/Markdown → PDF, Certificado A1, Verificar assinaturas, Detectar campos ----------
+
+export async function fromHtmlOrMarkdown(a: App): Promise<void> {
+  const { t } = a;
+  const [f] = await window.papiro.openDialog({ title: t("feat.htmlOpen"), webDoc: true });
+  if (!f?.path) return;
+  const v = await a.askForm({
+    title: t("feat.htmlTitle"), okLabel: t("feat.htmlOk"),
+    message: t("feat.htmlMsg", { name: f.name }),
+    fields: [
+      { id: "pageSize", label: t("feat.htmlPageSize"), type: "select", value: "A4", span: 3, options: [
+        { value: "A4", label: t("feat.sizeA4") },
+        { value: "Letter", label: t("feat.sizeLetter") },
+      ] },
+      { id: "landscape", label: t("feat.htmlLandscape"), type: "checkbox", value: false, span: 3 },
+    ],
+  });
+  if (!v) return;
+  const out = await a.task(t("feat.htmlBusy"), () =>
+    window.papiro.convertToPdf({ path: f.path!, pageSize: v.pageSize as "A4" | "Letter", landscape: !!v.landscape }),
+  );
+  if (!out) return;
+  await a.openData({ path: null, name: out.name, bytes: out.bytes });
+  a.notify(t("feat.htmlDone", { name: out.name }));
+}
+
+export async function signWithA1(a: App): Promise<void> {
+  const { t, lang } = a;
+  const [pfx] = await window.papiro.openDialog({ title: t("feat.signOpen"), pfx: true });
+  if (!pfx) return;
+  const v = await a.askForm({
+    title: t("feat.signTitle", { name: pfx.name }), okLabel: t("feat.signOk"),
+    message: t("feat.signMsg"),
+    fields: [
+      { id: "pw", label: t("feat.signPw"), type: "password", value: "", span: 6 },
+      { id: "reason", label: t("feat.signReason"), type: "text", value: "", span: 3, placeholder: t("feat.signReasonPh") },
+      { id: "location", label: t("feat.signLoc"), type: "text", value: "", span: 3, placeholder: t("feat.signLocPh") },
+      { id: "visible", label: t("feat.signVisible", { n: a.page + 1 }), type: "checkbox", value: true, span: 6 },
+    ],
+    validate: (f) => (String(f.pw).length ? null : t("feat.signPwErr")),
+  });
+  if (!v) return;
+
+  const certInfo = await a.task(t("feat.signValidating"), () => engine.inspectPfx(pfx.bytes, String(v.pw)));
+  if (!certInfo) return;
+  const tag = localeTag(lang);
+  if (certInfo.expired) {
+    const ok = await a.ask({
+      kind: "confirm", title: t("feat.signExpiredTitle"), okLabel: t("feat.signExpiredOk"),
+      message: t("feat.signExpiredMsg", {
+        cn: certInfo.commonName,
+        from: new Date(certInfo.validFrom).toLocaleDateString(tag),
+        to: new Date(certInfo.validTo).toLocaleDateString(tag),
+      }),
+    });
+    if (ok === null) return;
+  }
+
+  const path = await window.papiro.saveDialog(`${base(a)}_${t("feat.signSuffix")}.pdf`);
+  if (!path) return;
+
+  const pg = a.doc!.info.pages[a.page];
+  const visible = v.visible && pg
+    ? { page: a.page, rect: [pg.x + pg.width - 230, pg.y + pg.height - 92, pg.x + pg.width - 24, pg.y + pg.height - 24] as [number, number, number, number] }
+    : undefined;
+
+  await a.task(t("feat.signBusy"), async () => {
+    const res = await engine.signDigital({
+      pfxBytes: pfx.bytes,
+      password: String(v.pw),
+      reason: String(v.reason).trim() || undefined,
+      location: String(v.location).trim() || undefined,
+      visible,
+    });
+    await window.papiro.writeFile(path, res.bytes);
+    await a.adoptFile(path, res.bytes);
+    a.notify(t("feat.signDone", { cn: res.cert.commonName, path }));
+  });
+}
+
+export async function verifySignatures(a: App): Promise<void> {
+  const { t, lang } = a;
+  const sigs = await a.task(t("feat.verifyBusy"), () => engine.verifySignatures());
+  if (!sigs) return;
+  if (!sigs.length) {
+    a.notify(t("feat.verifyNone"));
+    return;
+  }
+  const STATUS: Record<string, string> = {
+    valid: t("feat.verifyValid"),
+    tampered: t("feat.verifyTampered"),
+    invalid: t("feat.verifyInvalid"),
+  };
+  const tag = localeTag(lang);
+  const lines = sigs.map((s, idx) => [
+    `${idx + 1}. ${s.signerName} — ${STATUS[s.status] ?? s.status}`,
+    s.issuer ? t("feat.verifyIssuer", { v: s.issuer }) : "",
+    s.validTo ? t("feat.verifyValidity", { from: new Date(s.validFrom).toLocaleDateString(tag), to: new Date(s.validTo).toLocaleDateString(tag) }) : "",
+    s.reason ? t("feat.verifyReason", { v: s.reason }) : "",
+    s.location ? t("feat.verifyLocation", { v: s.location }) : "",
+    `   ${s.note}`,
+  ].filter(Boolean).join("\n"));
+  await a.ask({
+    kind: "confirm",
+    title: t("feat.verifyTitle", { n: sigs.length }),
+    okLabel: t("common.close"),
+    message: lines.join("\n\n"),
+  });
+}
+
+export async function autoDetectFields(a: App): Promise<void> {
+  const { t } = a;
+  const r = await a.task(t("feat.autoFldBusy", { n: a.page + 1 }), () => engine.autoDetectFields(a.page));
+  if (!r) return;
+  if (!r.created) {
+    a.notify(t("feat.autoFldNone"));
+    return;
+  }
+  await a.mutate("…", async () => r.info);
+  a.notify(t("feat.autoFldDone", { count: r.created, page: a.page + 1 }));
 }

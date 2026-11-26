@@ -1,5 +1,6 @@
 // Leitor em rolagem contínua, com renderização só das páginas visíveis.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { localeTag } from "../../shared/i18n.ts";
 import { Icon } from "./icons.tsx";
 import { PageView } from "./PageView.tsx";
 import { useApp } from "./state.tsx";
@@ -133,25 +134,28 @@ function Welcome() {
   const app = useApp();
   const [recent, setRecent] = useState<RecentItem[]>([]);
   useEffect(() => { window.papiro.recentList().then(setRecent).catch(() => {}); }, []);
-  const when = (t: number) => {
-    const days = Math.floor((new Date().setHours(0, 0, 0, 0) - new Date(t).setHours(0, 0, 0, 0)) / 86_400_000);
-    return days <= 0 ? "hoje" : days === 1 ? "ontem" : days < 7 ? `há ${days} dias` : new Date(t).toLocaleDateString("pt-BR");
+  const when = (ts: number) => {
+    const days = Math.floor((new Date().setHours(0, 0, 0, 0) - new Date(ts).setHours(0, 0, 0, 0)) / 86_400_000);
+    return days <= 0 ? app.t("welcome.today")
+      : days === 1 ? app.t("welcome.yesterday")
+      : days < 7 ? app.t("welcome.daysAgo", { n: days })
+      : new Date(ts).toLocaleDateString(localeTag(app.lang));
   };
   return (
     <div className="welcome">
       <h1>PapyrusPDF</h1>
-      <p>Abra um PDF para ler, anotar, preencher, organizar, editar texto ou reconhecer texto (OCR).</p>
+      <p>{app.t("welcome.subtitle")}</p>
       <div className="welcome-actions">
-        <button className="primary" onClick={() => app.openFile()}>Abrir PDF…</button>
-        <button onClick={() => app.mergeFiles()}>Combinar PDFs…</button>
-        <button onClick={() => app.newFromImages()}>Criar a partir de imagens…</button>
+        <button className="primary" onClick={() => app.openFile()}>{app.t("welcome.openBtn")}</button>
+        <button onClick={() => app.mergeFiles()}>{app.t("welcome.mergeBtn")}</button>
+        <button onClick={() => app.newFromImages()}>{app.t("welcome.imagesBtn")}</button>
       </div>
-      <p className="hint">Dica: arraste um PDF ou imagens para esta janela. Ctrl+O abre, Ctrl+S salva, Ctrl+P imprime, Ctrl+F busca.</p>
+      <p className="hint">{app.t("welcome.hint")}</p>
       {recent.length > 0 && (
-        <section className="recent" aria-label="Arquivos recentes">
+        <section className="recent" aria-label={app.t("welcome.recentAria")}>
           <header>
-            <h2><Icon name="clock" size={15} /> Recentes</h2>
-            <button onClick={() => window.papiro.recentClear().then(setRecent)}>Limpar lista</button>
+            <h2><Icon name="clock" size={15} /> {app.t("welcome.recentTitle")}</h2>
+            <button onClick={() => window.papiro.recentClear().then(setRecent)}>{app.t("welcome.clearList")}</button>
           </header>
           <ul>
             {recent.map((r) => (
@@ -159,9 +163,9 @@ function Welcome() {
                 <button className="ritem" title={r.path} onClick={() => app.openFile(r.path)}>
                   <b>{r.name}</b>
                   <small>{r.path.replace(/[\\/][^\\/]*$/, "")}</small>
-                  <span>{when(r.when)}{r.page > 0 ? ` · pág. ${r.page + 1}` : ""}</span>
+                  <span>{when(r.when)}{r.page > 0 ? app.t("welcome.pageTag", { n: r.page + 1 }) : ""}</span>
                 </button>
-                <button className="rdel" title="Tirar da lista" aria-label={`Tirar ${r.name} da lista`}
+                <button className="rdel" title={app.t("welcome.removeTip")} aria-label={app.t("welcome.removeAria", { name: r.name })}
                   onClick={() => window.papiro.recentRemove(r.path).then(setRecent)}><Icon name="close" size={14} /></button>
               </li>
             ))}

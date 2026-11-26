@@ -1,9 +1,9 @@
 {
   "name": "papiro-pdf",
   "productName": "PapyrusPDF",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "private": true,
-  "description": "Editor de PDF para Windows, de código aberto e offline (Electron + MuPDF + Tesseract)",
+  "description": "Open-source, 100% offline PDF editor for Windows — edit text, neural PP-OCRv5 OCR, form builder, digital signatures, smart redaction, and batch workflows (Electron + MuPDF + ONNX)",
   "author": "lucaszuzu17",
   "homepage": "https://github.com/lucaszuzu17/PapyrusPDF",
   "repository": {
@@ -25,7 +25,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test test/engine.test.ts test/features.test.ts test/review.test.ts test/pacote-a.test.ts test/protecao.test.ts test/text-editing.test.ts test/new-features.test.ts",
+    "test": "node --test test/engine.test.ts test/features.test.ts test/review.test.ts test/pacote-a.test.ts test/protecao.test.ts test/text-editing.test.ts test/new-features.test.ts test/tier1.test.ts test/tier2.test.ts test/i18n.test.ts test/ocr-neural.test.ts",
     "fixtures": "node test/fixtures.ts",
     "e2e": "electron-vite build && node test/run-e2e.mjs",
     "icon": "node build/make-icon.ts",
@@ -37,10 +37,13 @@
     "@tesseract.js-data/por": "^1.0.0",
     "@tesseract.js-data/spa": "^1.0.0",
     "mupdf": "^1.28.6",
+    "node-forge": "^1.4.4",
+    "onnxruntime-node": "^1.31.1",
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "@types/node-forge": "^1.3.14",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
@@ -55,15 +58,15 @@
   "build": {
     "appId": "local.papiro.pdf",
     "productName": "PapyrusPDF",
-    "copyright": "Copyright (C) 2026 lucaszuzu17. Software livre sob a AGPL-3.0-or-later.",
+    "copyright": "Copyright (C) 2026 lucaszuzu17. Free software under AGPL-3.0-or-later.",
     "directories": {
       "output": "dist",
       "buildResources": "build"
     },
     "files": [
       "out/**",
-      "package.json",
-      "!**/node_modules/@tesseract.js-data/*/4.0.0_best_int{,/**}"
+      "models/ocr/**",
+      "package.json"
     ],
     "extraFiles": [
       {
@@ -74,7 +77,8 @@
     "asar": false,
     "electronLanguages": [
       "pt-BR",
-      "en-US"
+      "en-US",
+      "es"
     ],
     "win": {
       "target": [
@@ -97,16 +101,17 @@
       "shortcutName": "PapyrusPDF",
       "uninstallDisplayName": "PapyrusPDF",
       "installerLanguages": [
-        "pt_BR"
+        "pt_BR",
+        "en_US",
+        "es_ES"
       ],
-      "language": "1046",
       "deleteAppDataOnUninstall": false
     },
     "fileAssociations": [
       {
         "ext": "pdf",
-        "name": "Documento PDF",
-        "description": "Documento PDF",
+        "name": "PDF Document",
+        "description": "PDF Document",
         "role": "Editor",
         "icon": "build/file.ico"
       }

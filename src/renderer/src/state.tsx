@@ -1,14 +1,19 @@
 // Estado global do aplicativo e as ações que mexem no documento.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  defaultOcrLang, localeTag, resolveLang, translate,
+  type I18nKey, type LangPref, type UiLang,
+} from "../../shared/i18n.ts";
 import { disposeDoc, engine, engineAt, engineDoc, setEngineDoc, type CompareReport, type DocInfo, type OutlineNode, type SearchHit } from "./api.ts";
 import { prepareImages } from "./images.ts";
+import { tts } from "./tts.ts";
 
 export type Tool =
   | "select" | "hand" | "highlight" | "underline" | "strikeout" | "note" | "freetext"
   | "ink" | "rect" | "ellipse" | "line" | "arrow" | "signature" | "stamp" | "redact"
-  | "edittext" | "addtext" | "overlayimg" | "measure";
+  | "edittext" | "addtext" | "overlayimg" | "measure" | "link" | "addfield";
 
-export type Panel = "pages" | "outline" | "comments" | "search" | null;
+export type Panel = "pages" | "outline" | "comments" | "attachments" | "layers" | "search" | null;
 export type RGB = [number, number, number];
 export type View = "read" | "organize";
 /** Uma página por vez (rolagem contínua) ou duas lado a lado. */
@@ -77,16 +82,18 @@ interface Dialog {
 /** Carimbo pronto para ser colocado na página (PNG transparente). */
 export interface Stamp { png: string; width: number; height: number; label: string }
 
-/** Idiomas de OCR que acompanham o programa (códigos do Tesseract; "+" combina). */
-export const OCR_LANGS: { value: string; label: string }[] = [
-  { value: "por", label: "Português" },
-  { value: "eng", label: "Inglês" },
-  { value: "spa", label: "Espanhol" },
-  { value: "por+eng", label: "Português + inglês" },
-  { value: "por+spa", label: "Português + espanhol" },
-];
+/** Códigos de idiomas de OCR que acompanham o programa (códigos do Tesseract; "+" combina). */
+const OCR_LANG_VALUES = ["por", "eng", "spa", "por+eng", "por+spa", "eng+spa"] as const;
+export function ocrLangOptions(lang: UiLang): { value: string; label: string }[] {
+  return OCR_LANG_VALUES.map((value) => ({ value, label: translate(lang, `ocrLang.${value}` as I18nKey) }));
+}
 
 interface Ctx {
+  uiLangPref: LangPref;
+  lang: UiLang;
+  systemLang: UiLang;
+  setUiLang: (p: LangPref) => void;
+  t: (key: I18nKey, vars?: Record<string, string | number>) => string;
   doc: OpenDoc | null;
   tabs: TabItem[];
   switchTab: (id: number) => void;
@@ -111,6 +118,11 @@ interface Ctx {
   signature: string | null; setSignature: (s: string | null) => void;
   stamp: Stamp | null; setStamp: (s: Stamp | null) => void;
   ocrLang: string; setOcrLang: (l: string) => void;
+  ocrQuality: "neural" | "best" | "fast"; setOcrQuality: (q: "neural" | "best" | "fast") => void;
+  ocrCleanup: boolean; setOcrCleanup: (on: boolean) => void;
+  recoveryItems: { id: string; name: string; origPath: string | null; savedAt: number }[];
+  restoreRecovery: () => Promise<void>;
+  dismissRecovery: () => Promise<void>;
   busy: string | null; toast: string | null; notify: (m: string) => void;
   progress: { done: number; total: number } | null;
   scanned: number[]; ocrProgress: { done: number; total: number } | null;
@@ -129,6 +141,7 @@ interface Ctx {
   insertImages: (files?: InFile[]) => Promise<void>;
   printDoc: () => Promise<void>;
   refresh: () => Promise<void>;
+  rerender: () => void;
   undo: () => Promise<unknown>; redo: () => Promise<unknown>;
   /** Executa uma alteração no documento. Devolve se deu certo (em caso de erro, o aviso já foi mostrado). */
   mutate: (label: string, fn: () => Promise<DocInfo | { info: DocInfo }>) => Promise<boolean>;
@@ -145,6 +158,7 @@ const SIG_KEY = "papiro.signature";
 const LAYOUT_KEY = "papiro.layout";
 const READMODE_KEY = "papiro.readMode";
 const OCR_KEY = "papiro.ocrLang";
+const LANG_KEY = "papiro.uiLang";
 const IMAGE_RE = /\.(png|jpe?g|bmp|gif|webp)$/i;
 const baseName = (name: string) => name.replace(/\.pdf$/i, "");
 const samePath = (a: string | null, b: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -157,6 +171,35 @@ export const errText = (e: unknown) =>
   (e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
 
 export function AppProvider({ children }: { children: ReactNode }) {
+  const [uiLangPref, setUiLangPrefRaw] = useState<LangPref>(() => {
+    const v = stored(LANG_KEY);
+    return v === "pt" || v === "en" || v === "es" ? v : "auto";
+  });
+  const [systemLocale, setSystemLocale] = useState<string>(() => (typeof navigator !== "undefined" ? navigator.language : "en-US"));
+  const systemLang = useMemo(() => resolveLang("auto", systemLocale), [systemLocale]);
+  const lang = useMemo(() => resolveLang(uiLangPref, systemLocale), [uiLangPref, systemLocale]);
+  const t = useCallback((key: I18nKey, vars?: Record<string, string | number>) => translate(lang, key, vars), [lang]);
+  const langRef = useRef<UiLang>(lang);
+  langRef.current = lang;
+  const tRef = useRef(t);
+  tRef.current = t;
+
+  const setUiLang = useCallback((pref: LangPref) => {
+    setUiLangPrefRaw(pref);
+    store(LANG_KEY, pref);
+  }, []);
+
+  useEffect(() => {
+    window.papiro.getSystemLocale().then((loc) => {
+      if (loc) setSystemLocale(loc);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = localeTag(lang);
+    window.papiro.setUiLang(uiLangPref).catch(() => {});
+  }, [lang, uiLangPref]);
+
   const [doc, setDoc] = useState<OpenDoc | null>(null);
   const [tabs, setTabs] = useState<TabItem[]>([]);
   const [tool, setTool] = useState<Tool>("select");
@@ -181,8 +224,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [stamp, setStamp] = useState<Stamp | null>(null);
   const [ocrLang, setOcrLangRaw] = useState<string>(() => {
     const v = stored(OCR_KEY);
-    return OCR_LANGS.some((l) => l.value === v) ? v! : "por";
+    return v && (OCR_LANG_VALUES as readonly string[]).includes(v) ? v : defaultOcrLang(lang);
   });
+  // Se o usuário ainda não escolheu manualmente um idioma de OCR, acompanha o idioma resolvido do sistema
+  useEffect(() => {
+    if (!stored(OCR_KEY)) setOcrLangRaw(defaultOcrLang(lang));
+  }, [lang]);
+
+  const [ocrQuality, setOcrQualityRaw] = useState<"neural" | "best" | "fast">(() => {
+    const v = stored("papiro.ocrQuality");
+    return v === "best" || v === "fast" ? v : "neural";
+  });
+  const [ocrCleanup, setOcrCleanupRaw] = useState<boolean>(() => stored("papiro.ocrCleanup") !== "0");
+  const [recoveryItems, setRecoveryItems] = useState<{ id: string; name: string; origPath: string | null; savedAt: number }[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -218,6 +272,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const setSignature = (s: string | null) => { setSignatureRaw(s); store(SIG_KEY, s); };
   const setOcrLang = (l: string) => { setOcrLangRaw(l); store(OCR_KEY, l); };
+  const setOcrQuality = (q: "neural" | "best" | "fast") => { setOcrQualityRaw(q); store("papiro.ocrQuality", q); };
+  const setOcrCleanup = (on: boolean) => { setOcrCleanupRaw(on); store("papiro.ocrCleanup", on ? "1" : "0"); };
   const setLayout = (l: Layout) => { setLayoutRaw(l); store(LAYOUT_KEY, l); };
   const setReadMode = (m: ReadMode) => { setReadModeRaw(m); store(READMODE_KEY, m); };
 
@@ -245,7 +301,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     busyRef.current++;
     setBusy(label);
     try { return await fn(); }
-    catch (e) { notify(`Erro: ${errText(e)}`); return undefined; }
+    catch (e) { notify(tRef.current("common.errorPrefix", { msg: errText(e) })); return undefined; }
     finally { if (--busyRef.current === 0) { setBusy(null); setProgress(null); } }
   }, [notify]);
 
@@ -272,6 +328,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!docRef.current) return;
     try { apply(await engine.info()); } catch { /* documento fechado no meio do caminho */ }
   }, [apply]);
+
+  /** Força a re-renderização das páginas visíveis (ex.: ao alternar camadas OCG). */
+  const rerender = useCallback(() => {
+    setDoc((d) => (d ? { ...d, rev: ++revSeq.current } : d));
+  }, []);
 
   const goTo = useCallback((p: number) => {
     setPage(p);
@@ -304,9 +365,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const switchTab = useCallback((id: number) => {
     if (docRef.current?.id === id) return;
-    if (occupied()) { notify("Termine a operação em andamento antes de trocar de aba."); return; }
+    if (occupied()) { notify(tRef.current("state.busySwitchTab")); return; }
     const s = snaps.current.get(id);
     if (!s) return;
+    tts.stop();
     stash();
     snaps.current.delete(id);
     show(s);
@@ -315,18 +377,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const cycleTab = useCallback((d: number) => {
     const list = tabsRef.current;
     if (list.length < 2 || !docRef.current) return;
-    const i = list.findIndex((t) => t.id === docRef.current!.id);
+    const i = list.findIndex((x) => x.id === docRef.current!.id);
     switchTab(list[(i + d + list.length) % list.length].id);
   }, [switchTab]);
 
   const closeTab = useCallback(async (id: number) => {
-    if (occupied()) { notify("Termine a operação em andamento antes de fechar a aba."); return; }
-    const t = tabsRef.current.find((x) => x.id === id);
-    if (!t) return;
-    const dirty = docRef.current?.id === id ? docRef.current.info.dirty : t.dirty;
+    if (occupied()) { notify(tRef.current("state.busyCloseTab")); return; }
+    const tab = tabsRef.current.find((x) => x.id === id);
+    if (!tab) return;
+    const dirty = docRef.current?.id === id ? docRef.current.info.dirty : tab.dirty;
     if (dirty && (await ask({
-      kind: "confirm", title: "Alterações não salvas", okLabel: "Fechar sem salvar",
-      message: `“${t.name}” tem alterações que ainda não foram salvas. Fechar e perder essas alterações?`,
+      kind: "confirm", title: tRef.current("state.unsavedTitle"), okLabel: tRef.current("state.unsavedOk"),
+      message: tRef.current("state.unsavedMsg", { name: tab.name }),
     })) === null) return;
     const list = tabsRef.current;
     const i = list.findIndex((x) => x.id === id);
@@ -334,6 +396,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setTabs(rest);
     snaps.current.delete(id);
     if (docRef.current?.id === id) {
+      tts.stop();
       const next = rest[Math.min(i, rest.length - 1)];
       const s = next ? snaps.current.get(next.id) : undefined;
       if (s) { snaps.current.delete(next!.id); show(s); }
@@ -343,6 +406,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     }
     disposeDoc(id).catch(() => {});
+    window.papiro.recoveryDelete(`tab_${id}`).catch(() => {});
   }, [ask, notify, show]);
 
   /** O documento já está aberto no motor (`id`): mostra numa aba (nova ou a mesma, no caso de `adoptFile`). */
@@ -351,8 +415,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const last = path ? await window.papiro.recentAdd(path).catch(() => 0) : 0;
     const start = Math.max(0, Math.min(keepPage ?? last, info.pageCount - 1));
     if (docRef.current?.id !== id) stash();
-    setTabs((ts) => ts.some((t) => t.id === id)
-      ? ts.map((t) => (t.id === id ? { id, name, path, dirty: info.dirty } : t))
+    setTabs((ts) => ts.some((x) => x.id === id)
+      ? ts.map((x) => (x.id === id ? { id, name, path, dirty: info.dirty } : x))
       : [...ts, { id, name, path, dirty: info.dirty }]);
     const first = info.pages[start];
     const z = first && keepPage === undefined ? Math.min(1.6, Math.max(0.5, (viewportWidth.current - 64) / first.width)) : cur.current.zoom;
@@ -361,7 +425,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       doc: { id, path, name, info, rev: ++revSeq.current, gen: ++revSeq.current },
       page: start, zoom: z, search: { query: "", hits: [], active: -1 }, scanned: sc, selectedPages: [], view: "read",
     });
-    setTool((t) => (t === "hand" ? t : "select"));
+    setTool((tl) => (tl === "hand" ? tl : "select"));
   }, [stash, show]);
 
   /** Abre bytes numa aba nova (pedindo a senha, se for o caso). Devolve o id da aba ou null se desistiu. */
@@ -372,9 +436,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       let info = await e.open(f.bytes, baseName(f.name));
       if (await e.needsPassword()) {
         for (;;) {
-          const pw = await ask({ kind: "password", title: "Documento protegido", message: `Digite a senha para abrir “${f.name}”.` });
+          const pw = await ask({
+            kind: "password",
+            title: tRef.current("state.protectedTitle"),
+            message: tRef.current("state.protectedMsg", { name: f.name }),
+          });
           if (pw === null) { disposeDoc(id).catch(() => {}); return null; }
-          try { info = await e.unlock(pw); break; } catch { notify("Senha incorreta."); }
+          try { info = await e.unlock(pw); break; } catch { notify(tRef.current("state.wrongPassword")); }
         }
       }
       await loaded(id, f.name, f.path, info);
@@ -387,19 +455,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const openData = useCallback(async (f: InFile) => {
     // o mesmo arquivo já aberto: só traz a aba para a frente
-    const open = tabsRef.current.find((t) => samePath(t.path, f.path));
+    const open = tabsRef.current.find((x) => samePath(x.path, f.path));
     if (open) { switchTab(open.id); return; }
-    await task("Abrindo…", () => openInNewTab(f));
+    await task(tRef.current("state.opening"), () => openInNewTab(f));
   }, [task, openInNewTab, switchTab]);
 
   const openFile = useCallback(async (path?: string) => {
     if (path) {
-      const open = tabsRef.current.find((t) => samePath(t.path, path));
+      const open = tabsRef.current.find((x) => samePath(x.path, path));
       if (open) { switchTab(open.id); return; }
     }
     let f: InFile | undefined;
     try { f = path ? await window.papiro.readFile(path) : (await window.papiro.openDialog())[0]; }
-    catch { notify(`Não foi possível ler ${path ?? "o arquivo"}.`); if (path) window.papiro.recentRemove(path).catch(() => {}); return; }
+    catch {
+      notify(tRef.current("state.readErr", { target: path ?? tRef.current("state.theFile") }));
+      if (path) window.papiro.recentRemove(path).catch(() => {});
+      return;
+    }
     if (f) await openData(f);
   }, [openData, notify, switchTab]);
 
@@ -418,39 +490,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (as || !path) path = await window.papiro.saveDialog(doc.path ?? doc.name);
     if (!path) return;
     const target = path;
-    await task("Salvando…", async () => {
-      // Confere se o destino pode ser gravado ANTES de chamar engine.save() (que limpa o histórico de Desfazer)
+    await task(tRef.current("common.saving"), async () => {
+      // Confere se o destino pode ser gravado ANTES de chamar engine.save()
       try { await window.papiro.checkWritable(target); }
       catch (e) {
-        throw new Error(`não foi possível gravar em ${target} (${errText(e)}). O arquivo pode estar aberto em outro programa.`);
+        throw new Error(tRef.current("state.writeErr", { target, err: errText(e) }));
       }
       const bytes = await engine.save();
       const name = target.split(/[\\/]/).pop()!;
       try { await window.papiro.writeFile(target, bytes); }
       catch (e) {
-        // o motor já considera salvo; marca de novo como alterado para não perder o aviso ao sair
         apply(await engine.markModified());
-        throw new Error(`não foi possível gravar em ${target} (${errText(e)}). O arquivo pode estar aberto em outro programa.`);
+        throw new Error(tRef.current("state.writeErr", { target, err: errText(e) }));
       }
       await engine.setTitle(baseName(name));
       const info = await engine.info();
       setDoc((d) => (d ? { ...d, path: target, name, info, rev: ++revSeq.current } : d));
       await window.papiro.recentAdd(target).catch(() => 0);
       window.papiro.recentPage(target, page);
-      notify(`Salvo em ${target}`);
+      window.papiro.recoveryDelete(`tab_${doc.id}`).catch(() => {});
+      notify(tRef.current("state.savedIn", { target }));
     });
   }, [doc, task, notify, page, apply]);
 
   const mergeFiles = useCallback(async (given?: InFile[]) => {
-    const files = given ?? await window.papiro.openDialog({ title: "Escolha os PDFs para combinar (na ordem desejada)", multi: true });
-    if (files.length < 2) { if (files.length) notify("Escolha pelo menos dois arquivos."); return; }
-    await task("Combinando…", async () => {
+    const files = given ?? await window.papiro.openDialog({ title: tRef.current("state.mergeTitle"), multi: true });
+    if (files.length < 2) { if (files.length) notify(tRef.current("state.mergeNeedTwo")); return; }
+    await task(tRef.current("state.merging"), async () => {
       const id = nextId.current++;
       const e = engineAt(id);
-      let info = await e.open(files[0].bytes, "Combinado");
+      const mergedName = tRef.current("state.mergedName");
+      let info = await e.open(files[0].bytes, mergedName);
       if (await e.needsPassword()) {
         disposeDoc(id).catch(() => {});
-        throw new Error(`“${files[0].name}” é protegido por senha. Abra-o e use Proteger → Remover proteção antes de combinar.`);
+        throw new Error(tRef.current("state.mergeProtectedErr", { name: files[0].name }));
       }
       const bookmarks: OutlineNode[] = [{ title: baseName(files[0].name), page: 0, children: [] }];
       try {
@@ -462,11 +535,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         if (bookmarks.length > 1) info = await e.setOutline(bookmarks);
       } finally {
-        // mesmo se um arquivo falhar, a aba nova mostra o que o motor tem aberto
         info = await e.info();
-        await loaded(id, "Combinado.pdf", null, info);
+        await loaded(id, `${mergedName}.pdf`, null, info);
       }
-      notify(`${files.length} arquivos combinados (${info.pageCount} páginas) com marcadores criados. Use Salvar para gravar.`);
+      notify(tRef.current("state.mergedDone", { files: files.length, pages: info.pageCount }));
     });
   }, [task, loaded, notify]);
 
@@ -474,25 +546,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     given ?? await window.papiro.openDialog({ title, images: true, multi: true });
 
   const newFromImages = useCallback(async (given?: InFile[]) => {
-    const files = await pickImages(given, "Escolha as imagens (cada uma vira uma página)");
+    const files = await pickImages(given, tRef.current("state.imgOpenTitle"));
     if (!files.length) return;
     const v = await askForm({
-      title: "Criar PDF a partir de imagens", okLabel: "Criar PDF",
-      message: `${files.length} imagem(ns), na ordem em que foram escolhidas.`,
-      fields: [{ id: "page", label: "Tamanho da página", type: "select", value: "A4", options: [
-        { value: "A4", label: "A4 (retrato ou paisagem conforme a imagem)" },
-        { value: "Carta", label: "Carta" },
-        { value: "imagem", label: "Do tamanho da imagem (sem margens)" },
+      title: tRef.current("state.imgFormTitle"), okLabel: tRef.current("state.imgFormOk"),
+      message: tRef.current("state.imgFormMsg", { n: files.length }),
+      fields: [{ id: "page", label: tRef.current("state.imgPageSize"), type: "select", value: "A4", options: [
+        { value: "A4", label: tRef.current("state.imgOptA4") },
+        { value: "Carta", label: tRef.current("state.imgOptLetter") },
+        { value: "imagem", label: tRef.current("state.imgOptOriginal") },
       ] }],
     });
     if (!v) return;
-    await task("Criando PDF…", async () => {
-      const imgs = await prepareImages(files);
+    await task(tRef.current("state.creatingPdf"), async () => {
+      const imgs = await prepareImages(files, langRef.current);
       const id = nextId.current++;
+      const imgTitle = tRef.current("state.imagesName");
       try {
-        const info = await engineAt(id).imagesToPdf(imgs, { page: v.page as "A4" | "Carta" | "imagem" }, "Imagens");
-        await loaded(id, "Imagens.pdf", null, info);
-        notify(`PDF criado com ${info.pageCount} página(s). Use Salvar para gravar.`);
+        const info = await engineAt(id).imagesToPdf(imgs, { page: v.page as "A4" | "Carta" | "imagem" }, imgTitle);
+        await loaded(id, `${imgTitle}.pdf`, null, info);
+        notify(tRef.current("state.imgCreated", { n: info.pageCount }));
       } catch (err) { disposeDoc(id).catch(() => {}); throw err; }
     });
   }, [askForm, task, loaded, notify]);
@@ -500,15 +573,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const insertImages = useCallback(async (given?: InFile[]) => {
     const d = docRef.current;
     if (!d) return;
-    const files = await pickImages(given, "Imagens para inserir como páginas");
+    const files = await pickImages(given, tRef.current("state.insImgTitle"));
     if (!files.length) return;
     const at = given ? -1 : page + 1;
-    const ok = await mutate("Inserindo imagens…", async () => engine.insertImages(await prepareImages(files), at, { page: "A4" }));
-    if (ok) notify(`${files.length} imagem(ns) inserida(s) ${at < 0 ? "no fim do documento" : `depois da página ${page + 1}`}.`);
+    const ok = await mutate(tRef.current("state.insertingImgs"), async () => engine.insertImages(await prepareImages(files, langRef.current), at, { page: "A4" }));
+    if (ok) {
+      notify(at < 0
+        ? tRef.current("state.imgInsertedEnd", { n: files.length })
+        : tRef.current("state.imgInsertedAfter", { n: files.length, page: page + 1 }));
+    }
   }, [mutate, notify, page]);
 
   const openDropped = useCallback(async (dropped: File[]) => {
-    if (occupied()) { notify("Termine a operação em andamento antes de soltar arquivos."); return; }
+    if (occupied()) { notify(tRef.current("state.busyDrop")); return; }
     const read = async (f: File): Promise<InFile> =>
       ({ path: window.papiro.pathForFile(f) || null, name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
     const pdfs = dropped.filter((f) => /\.pdf$/i.test(f.name) || f.type === "application/pdf");
@@ -519,26 +596,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
       else if (imgs.length) {
         const files = await Promise.all(imgs.map(read));
         if (docRef.current) await insertImages(files); else await newFromImages(files);
-      } else notify("Solte arquivos PDF ou imagens (PNG, JPG, BMP, GIF, WebP).");
-    } catch { notify("Não foi possível ler os arquivos soltos."); }
+      } else notify(tRef.current("state.dropInvalid"));
+    } catch { notify(tRef.current("state.dropReadErr")); }
   }, [openData, mergeFiles, insertImages, newFromImages, notify]);
 
   const printDoc = useCallback(async () => {
     if (!docRef.current) return;
     const id = engineDoc();
-    const r = await task("Preparando impressão…", () => window.papiro.print(id));
-    if (r && !r.ok && r.reason && !/cancel/i.test(r.reason)) notify(`Não foi possível imprimir: ${r.reason}`);
+    const r = await task(tRef.current("state.printing"), () => window.papiro.print(id));
+    if (r && !r.ok && r.reason && !/cancel/i.test(r.reason)) notify(tRef.current("state.printErr", { reason: r.reason }));
   }, [task, notify]);
 
-  const undo = useCallback(() => mutate("Desfazendo…", engine.undo), [mutate]);
-  const redo = useCallback(() => mutate("Refazendo…", engine.redo), [mutate]);
+  const undo = useCallback(() => mutate(tRef.current("state.undoing"), engine.undo), [mutate]);
+  const redo = useCallback(() => mutate(tRef.current("state.redoing"), engine.redo), [mutate]);
 
   const runSearch = useCallback(async (q: string) => {
     if (!doc) return;
-    const hits = (await task("Buscando…", () => engine.search(q))) ?? [];
+    const hits = (await task(tRef.current("state.searching"), () => engine.search(q))) ?? [];
     setSearch({ query: q, hits, active: hits.length ? 0 : -1 });
     if (hits.length) goTo(hits[0].page);
-    else if (q.trim()) notify("Nenhum resultado.");
+    else if (q.trim()) notify(tRef.current("state.noResults"));
   }, [doc, task, goTo, notify]);
 
   const stepSearch = useCallback((d: number) => {
@@ -554,44 +631,54 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!docRef.current) return;
     let pages: number[];
     if (which === "scanned") {
-      // confere na hora: páginas podem ter sido excluídas, reordenadas ou já reconhecidas
       pages = await engine.scannedPages().catch(() => [] as number[]);
       setScanned(pages);
-      if (!pages.length) { notify("Não há páginas escaneadas sem texto."); return; }
+      if (!pages.length) { notify(tRef.current("state.noScanned")); return; }
     } else {
       const n = docRef.current.info.pageCount;
       pages = which.filter((p) => p >= 0 && p < n);
     }
     if (!pages.length) return;
-    const lang = OCR_LANGS.find((l) => l.value === ocrLang)?.label ?? ocrLang;
+    const opts = ocrLangOptions(langRef.current);
+    const ocrLabel = opts.find((l) => l.value === ocrLang)?.label ?? ocrLang;
     setOcrProgress({ done: 0, total: pages.length });
     const off = window.papiro.onOcrProgress((p) => setOcrProgress({ done: p.done, total: p.total }));
     try {
-      const r = await task(`Reconhecendo texto em ${lang.toLowerCase()} (OCR) em ${pages.length} página(s)…`, () => engine.ocrPages(pages, ocrLang));
+      const quality = tRef.current(
+        ocrQuality === "neural" ? "state.ocrQualNeural" : ocrQuality === "best" ? "state.ocrQualBest" : "state.ocrQualFast",
+      );
+      const r = await task(
+        tRef.current("state.ocrTask", { lang: ocrLabel.toLowerCase(), quality, n: pages.length }),
+        () => engine.ocrPages(pages, ocrLang, 300, ocrQuality, ocrCleanup),
+      );
       if (r) {
         apply(r.info);
-        notify(`OCR concluído: ${r.words} palavras reconhecidas. O texto agora pode ser pesquisado e selecionado.`);
+        const extrasList = [
+          r.oriented ? tRef.current("state.ocrOriented", { n: r.oriented }) : "",
+          r.deskewed ? tRef.current("state.ocrDeskewed", { n: r.deskewed }) : "",
+          r.enhanced ? tRef.current("state.ocrEnhanced", { n: r.enhanced }) : "",
+        ].filter(Boolean).join(", ");
+        notify(tRef.current("state.ocrDone", { words: r.words, extras: extrasList ? ` (${extrasList})` : "" }));
       } else if (docRef.current) {
-        // falhou no meio: parte das páginas pode ter sido reconhecida; a tela volta a refletir o motor
         try { apply(await engine.info()); } catch { /* documento fechado */ }
       }
       await refreshScanned();
     } finally { off(); setOcrProgress(null); }
-  }, [task, apply, notify, refreshScanned, ocrLang]);
+  }, [task, apply, notify, refreshScanned, ocrLang, ocrQuality, ocrCleanup]);
 
   // a aba da frente mostra na barra o nome e se há alterações
   useEffect(() => {
     if (!doc) return;
     setTabs((ts) => {
-      const t = ts.find((x) => x.id === doc.id);
-      if (!t || (t.name === doc.name && t.path === doc.path && t.dirty === doc.info.dirty)) return ts;
+      const tab = ts.find((x) => x.id === doc.id);
+      if (!tab || (tab.name === doc.name && tab.path === doc.path && tab.dirty === doc.info.dirty)) return ts;
       return ts.map((x) => (x.id === doc.id ? { ...x, name: doc.name, path: doc.path, dirty: doc.info.dirty } : x));
     });
   }, [doc]);
 
   // título da janela e aviso de alterações não salvas (de qualquer aba)
   useEffect(() => {
-    const anyDirty = !!doc?.info.dirty || tabs.some((t) => t.dirty && t.id !== doc?.id);
+    const anyDirty = !!doc?.info.dirty || tabs.some((x) => x.dirty && x.id !== doc?.id);
     window.papiro.setState({
       dirty: anyDirty,
       doc: doc?.id ?? 0,
@@ -603,8 +690,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const docPath = doc?.path ?? null;
   useEffect(() => {
     if (!docPath) return;
-    const t = window.setTimeout(() => window.papiro.recentPage(docPath, page), 600);
-    return () => window.clearTimeout(t);
+    const tm = window.setTimeout(() => window.papiro.recentPage(docPath, page), 600);
+    return () => window.clearTimeout(tm);
   }, [docPath, page]);
 
   // andamento de operações longas do motor (impressão, exportações)
@@ -616,24 +703,64 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     window.papiro.takePendingPath().then((p) => { if (p) openRef.current(p); });
     return window.papiro.onOpenPath((p) => {
-      if (occupied()) { notify(`Termine a operação em andamento e abra “${p.split(/[\\/]/).pop()}” de novo.`); return; }
+      if (occupied()) { notify(tRef.current("state.busyOpenExternal", { name: p.split(/[\\/]/).pop() ?? p })); return; }
       openRef.current(p);
     });
+  }, [notify]);
+
+  // verificação inicial de rascunhos de recuperação (após falha inesperada)
+  useEffect(() => {
+    window.papiro.recoveryList().then((list) => { if (list.length) setRecoveryItems(list); }).catch(() => {});
+  }, []);
+
+  // auto-save offline periódico (a cada 45s) para documentos com alterações não salvas
+  useEffect(() => {
+    if (!doc?.info.dirty) return;
+    const tm = window.setInterval(async () => {
+      const d = docRef.current;
+      if (!d || !d.info.dirty || busyRef.current > 0) return;
+      try {
+        const bytes = await engineAt(d.id).peekBytes();
+        if (bytes.length <= 25_000_000) {
+          await window.papiro.recoverySave({ id: `tab_${d.id}`, name: d.name, origPath: d.path, bytes });
+        }
+      } catch { /* ignora erro pontual de auto-save */ }
+    }, 45_000);
+    return () => window.clearInterval(tm);
+  }, [doc?.id, doc?.info.dirty]);
+
+  const restoreRecovery = useCallback(async () => {
+    const list = recoveryItems;
+    setRecoveryItems([]);
+    for (const item of list) {
+      const data = await window.papiro.recoveryLoad(item.id).catch(() => null);
+      if (data) await openData({ path: null, name: data.name, bytes: data.bytes });
+    }
+    await window.papiro.recoveryClear().catch(() => {});
+    notify(tRef.current("state.recoveryRestored", { n: list.length }));
+  }, [recoveryItems, openData, notify]);
+
+  const dismissRecovery = useCallback(async () => {
+    setRecoveryItems([]);
+    await window.papiro.recoveryClear().catch(() => {});
   }, []);
 
   const value = useMemo<Ctx>(() => ({
+    uiLangPref, lang, systemLang, setUiLang, t,
     doc, tabs, switchTab, closeTab, cycleTab, tool, setTool, color, setColor, zoom, setZoom, page, setPage, goTo, gotoSignal,
     view, setView, layout, setLayout, readMode, setReadMode, measureScale, setMeasureScale,
     overlayImg, setOverlayImg, compareReport, setCompareReport, fullscreen, toggleFullScreen,
     panel, setPanel, selectedPages, setSelectedPages, search, runSearch, stepSearch, signature, setSignature,
-    stamp, setStamp, ocrLang, setOcrLang, busy, toast, notify, progress, scanned, ocrProgress, dialog, closeDialog, ask, askForm,
-    openFile, openData, adoptFile, openDropped, save, mergeFiles, newFromImages, insertImages, printDoc, refresh,
+    stamp, setStamp, ocrLang, setOcrLang, ocrQuality, setOcrQuality, ocrCleanup, setOcrCleanup,
+    recoveryItems, restoreRecovery, dismissRecovery, busy, toast, notify, progress, scanned, ocrProgress, dialog, closeDialog, ask, askForm,
+    openFile, openData, adoptFile, openDropped, save, mergeFiles, newFromImages, insertImages, printDoc, refresh, rerender,
     undo, redo, mutate, task, runOcr, fitWidth, viewportWidth,
-  }), [doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
+  }), [uiLangPref, lang, systemLang, setUiLang, t, doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
     readMode, measureScale, overlayImg, compareReport, fullscreen,
-    toggleFullScreen, panel, selectedPages, search, runSearch, stepSearch, signature, stamp, ocrLang, busy, toast, notify,
+    toggleFullScreen, panel, selectedPages, search, runSearch, stepSearch, signature, stamp, ocrLang, ocrQuality, ocrCleanup,
+    recoveryItems, restoreRecovery, dismissRecovery, busy, toast, notify,
     progress, scanned, ocrProgress, dialog, ask, askForm, openFile, openData, adoptFile, openDropped, save, mergeFiles,
-    newFromImages, insertImages, printDoc, refresh, undo, redo, mutate, task, runOcr, fitWidth]); // eslint-disable-line react-hooks/exhaustive-deps
+    newFromImages, insertImages, printDoc, refresh, rerender, undo, redo, mutate, task, runOcr, fitWidth]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <C.Provider value={value}>{children}</C.Provider>;
 }

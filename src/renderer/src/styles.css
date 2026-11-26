@@ -111,7 +111,12 @@ button.primary { background: var(--accent); color: var(--accent-ink); padding: 6
 .hit.active { background: var(--hit-active); }
 .tsel { background: var(--sel); pointer-events: none; }
 .eblock { outline: 1px dashed rgba(181, 118, 42, 0.7); background: rgba(181, 118, 42, 0.06); pointer-events: none; }
-.redmark { outline: 2px solid #d22; background: rgba(210, 30, 30, 0.12); pointer-events: none; }
+.redmark { outline: 2px solid #d22; background: rgba(210, 30, 30, 0.14); pointer-events: none; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.redmark-lbl { font-size: 9px; font-weight: 700; color: #b31919; background: rgba(255, 255, 255, 0.85); padding: 0 3px; border-radius: 2px; white-space: nowrap; }
+.link-box { cursor: pointer; border-radius: 2px; transition: background 0.12s; }
+.link-box:hover { background: rgba(37, 99, 235, 0.14); outline: 1px solid rgba(37, 99, 235, 0.55); }
+.link-edit { cursor: pointer; background: rgba(37, 99, 235, 0.14); outline: 1.5px dashed #2563eb; border-radius: 2px; }
+.link-edit:hover { background: rgba(210, 30, 30, 0.16); outline-color: #d22; }
 .asel { outline: 2px solid var(--accent); outline-offset: 2px; pointer-events: none; }
 .asel .mini { position: absolute; top: calc(100% + 6px); left: 0; pointer-events: auto; }
 .mini { display: flex; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); white-space: nowrap; z-index: 5; }
@@ -161,6 +166,7 @@ button.primary { background: var(--accent); color: var(--accent-ink); padding: 6
 /* diálogos e avisos */
 .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: grid; place-items: center; z-index: 50; }
 .modal { background: var(--panel); border-radius: 12px; box-shadow: var(--shadow); padding: 18px 20px; min-width: 380px; max-width: 640px; }
+.modal p { white-space: pre-line; }
 .modal h2 { margin: 0 0 8px; font-size: 16px; }
 .modal input, .modal textarea { width: 100%; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 14px; }
@@ -316,3 +322,29 @@ button.primary { background: var(--accent); color: var(--accent-ink); padding: 6
   .cmp-list.rem li { color: #ffb4ab; }
   .cmp-list.add li { color: #93c5fd; }
 }
+
+/* controles extras do painel lateral (marcadores auto, filtro de comentários, anexos e camadas) */
+.side-tools { display: flex; gap: 6px; }
+.side-tools > button { flex: 1; font-size: 12px; padding: 5px 6px; }
+.side-filter { display: flex; flex-direction: column; gap: 5px; }
+.side-filter input, .side-filter select { width: 100%; padding: 4px 7px; font-size: 12px; }
+.cquote { flex-basis: 100%; font-style: italic; font-size: 12px; color: var(--text); opacity: 0.85; border-left: 2px solid var(--accent); padding-left: 6px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.attach-row { align-items: center; }
+.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }
+.layer-row { padding: 4px 6px; border-radius: 6px; }
+.layer-row:hover { background: var(--accent-soft); }
+.layer-row label { display: flex; align-items: center; gap: 8px; width: 100%; cursor: pointer; }
+.layer-row input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); flex: none; }
+
+/* Tier 2: opções de OCR, criador de campos e barra de leitura em voz alta */
+.ocropts { display: flex; flex-direction: column; justify-content: center; gap: 5px; padding: 4px 6px; font-size: 12px; }
+.ocropts select { padding: 2px 6px; font-size: 12px; height: 26px; }
+.ocropts label { display: flex; align-items: center; gap: 6px; color: var(--text); cursor: pointer; white-space: nowrap; }
+.ocropts input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+.field-edit { cursor: pointer; background: rgba(37, 99, 235, 0.14); border: 1.5px dashed #2563eb; border-radius: 2px; display: flex; align-items: center; padding: 0 4px; overflow: hidden; }
+.field-edit span { font-size: 10px; font-weight: 600; color: #1d4ed8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.field-edit:hover { background: rgba(210, 30, 30, 0.16); border-color: #d22; }
+.field-edit:hover span { color: #b31919; }
+.tts-bar button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-color: var(--line); }
+.lang-pick { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; padding-bottom: 4px; color: var(--muted); }
+.lang-pick select { padding: 2px 6px; font-size: 11px; height: 24px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }

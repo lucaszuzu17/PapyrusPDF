@@ -74,7 +74,7 @@ export type NewAnnot =
   | { kind: "Square" | "Circle"; rect: Rect; color?: RGB; width?: number }
   | { kind: "Line"; from: Point; to: Point; arrow?: boolean; color?: RGB; width?: number }
   | { kind: "Stamp"; rect: Rect; png: Uint8Array }
-  | { kind: "Redact"; rect: Rect };
+  | { kind: "Redact"; rect: Rect; overlayText?: string };
 
 export interface FieldInfo {
   id: number;
@@ -146,17 +146,123 @@ export interface CompareReport {
   pages: ComparePageDiff[];
 }
 
+// ---------- Tier 1: Redação inteligente, Otimizador, Bates, Rótulos, Comentários, Anexos, Camadas, Links ----------
+
+export type RedactPatternId = "cpf" | "cnpj" | "email" | "phone" | "cep" | "rg" | "card";
+
+export interface SmartRedactRequest {
+  patterns: RedactPatternId[];
+  customQuery?: string;
+  isRegex?: boolean;
+  overlayText?: string;
+  pages?: number[];
+}
+
+export interface SmartRedactResult {
+  marked: number;
+  pages: number;
+  byLabel: Record<string, number>;
+  info: DocInfo;
+}
+
+export interface SpaceAudit {
+  totalBytes: number;
+  images: number;
+  fonts: number;
+  streams: number;
+  metadata: number;
+  attachments: number;
+  other: number;
+  imageCount: number;
+  fontCount: number;
+  attachmentCount: number;
+}
+
+export interface OptimizeOptions {
+  level: "nenhuma" | "leve" | "media" | "forte";
+  subsetFonts?: boolean;
+  deduplicate?: boolean;
+  stripMetadata?: boolean;
+  stripAttachments?: boolean;
+  stripBookmarks?: boolean;
+  stripThumbnails?: boolean;
+  stripJavaScript?: boolean;
+}
+
+export interface OptimizeResult {
+  bytes: Uint8Array;
+  before: number;
+  after: number;
+  images: number;
+}
+
+export interface BatesSpec {
+  prefix?: string;
+  suffix?: string;
+  startNumber: number;
+  digits?: number;
+  pos?: "tl" | "tc" | "tr" | "bl" | "bc" | "br";
+  size?: number;
+  margin?: number;
+  color?: RGB;
+  pages?: number[];
+}
+
+export type PageLabelStyle = "D" | "R" | "r" | "A" | "a" | "none";
+
+export interface PageLabelRule {
+  startPage: number; // índice 0-based
+  style: PageLabelStyle;
+  prefix?: string;
+  startAt?: number;
+}
+
+export interface CommentSummaryItem {
+  page: number;
+  pageLabel: string;
+  kind: string;
+  author: string;
+  contents: string;
+  quote: string;
+  color: number[];
+}
+
+export interface AttachmentInfo {
+  key: string;
+  filename: string;
+  mimetype: string;
+  size: number;
+}
+
+export interface LayerInfo {
+  index: number;
+  name: string;
+  visible: boolean;
+}
+
+export interface LinkInfo {
+  index: number;
+  rect: Rect;
+  uri: string;
+  isExternal: boolean;
+  targetPage: number; // >= 0 para link interno, -1 para externo ou sem destino
+}
+
 export type BatchAction =
-  | { kind: "compress"; level: "leve" | "media" | "forte" }
+  | { kind: "compress"; level: "leve" | "media" | "forte"; optimize?: OptimizeOptions }
   | { kind: "watermark"; text: string; opacity?: number; angle?: number; color?: RGB }
   | { kind: "number"; fmt: string; pos: "bc" | "br" | "bl" | "tc" | "tr" | "tl" }
+  | { kind: "bates"; prefix?: string; suffix?: string; startNumber: number; digits?: number; pos?: "tl" | "tc" | "tr" | "bl" | "bc" | "br"; size?: number; continuous?: boolean }
+  | { kind: "normalize"; target: "A4" | "Carta" }
   | { kind: "sanitize" }
   | { kind: "flatten" }
+  | { kind: "redactPatterns"; patterns: RedactPatternId[]; customQuery?: string; isRegex?: boolean; overlayText?: string }
   | { kind: "ocr"; langs: string };
 
 export interface BatchResult {
   processed: number;
   failed: { file: string; error: string }[];
+  batesEnd?: number;
 }
 
 export interface OcrProgress {
@@ -164,3 +270,63 @@ export interface OcrProgress {
   done: number;
   total: number;
 }
+
+// ---------- Tier 2: Assinatura Digital A1, Criador de Formulários, Pre-OCR ----------
+
+export interface PfxCertInfo {
+  commonName: string;
+  issuer: string;
+  serial: string;
+  validFrom: string;
+  validTo: string;
+  expired: boolean;
+}
+
+export interface DigitalSignOptions {
+  pfxBytes: Uint8Array;
+  password: string;
+  reason?: string;
+  location?: string;
+  contactInfo?: string;
+  /** Retângulo visível da assinatura (omitir = assinatura invisível). */
+  visible?: { page: number; rect: Rect };
+}
+
+export interface SignatureVerifyInfo {
+  fieldName: string;
+  signerName: string;
+  issuer: string;
+  serial: string;
+  validFrom: string;
+  validTo: string;
+  signingTime: string;
+  reason: string;
+  location: string;
+  subFilter: string;
+  /** Integridade criptográfica do ByteRange e assinatura válida pela chave pública do certificado embutido. */
+  integrityValid: boolean;
+  /** O ByteRange cobre todo o arquivo (nenhum dado acrescentado fora da assinatura). */
+  coversWholeDocument: boolean;
+  status: "valid" | "tampered" | "invalid";
+  note: string;
+}
+
+export type NewFieldKind = "text" | "checkbox" | "combobox" | "signature";
+
+export interface CreateFieldSpec {
+  page: number;
+  kind: NewFieldKind;
+  name: string;
+  rect: Rect;
+  multiline?: boolean;
+  options?: string[];
+  defaultValue?: string;
+}
+
+export interface OcrOptions {
+  dpi?: number;
+  langs?: string;
+  quality?: "fast" | "best";
+  cleanup?: boolean;
+}
+

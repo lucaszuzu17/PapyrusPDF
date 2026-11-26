@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import type { I18nKey } from "../../shared/i18n.ts";
 import { Dialogs } from "./Dialogs.tsx";
 import { Icon } from "./icons.tsx";
 import { Organizer } from "./Organizer.tsx";
 import { Ribbon } from "./Ribbon.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { AppProvider, useApp, type Tool } from "./state.tsx";
+import { tts, type TtsState } from "./tts.ts";
 import { Viewer } from "./Viewer.tsx";
 
 export function App() {
@@ -15,30 +17,34 @@ export function App() {
   );
 }
 
-const HINT: Partial<Record<Tool, string>> = {
-  select: "Arraste sobre o texto para selecionar; clique numa anotação para editá-la ou excluí-la.",
-  hand: "Arraste para mover a página.",
-  highlight: "Arraste sobre o texto para realçar.",
-  underline: "Arraste sobre o texto para sublinhar.",
-  strikeout: "Arraste sobre o texto para tachar.",
-  note: "Clique onde a nota deve ficar.",
-  freetext: "Arraste uma caixa (ou clique) e digite.",
-  ink: "Desenhe à mão livre.",
-  rect: "Arraste para desenhar um retângulo.",
-  ellipse: "Arraste para desenhar uma elipse.",
-  line: "Arraste para desenhar uma linha.",
-  arrow: "Arraste para desenhar uma seta.",
-  signature: "Clique onde a assinatura deve ficar.",
-  stamp: "Clique onde o carimbo deve ficar. Para trocar de modelo, use Comentar → Carimbo.",
-  redact: "Arraste sobre o que deve ser apagado. Depois use “Aplicar redações”.",
-  edittext: "Clique num parágrafo para reescrevê-lo. Ctrl+Enter confirma, Esc cancela.",
-  addtext: "Clique em qualquer ponto da página para inserir novo texto. Ctrl+Enter confirma.",
-  overlayimg: "Clique ou arraste na página para posicionar e redimensionar a imagem.",
-  measure: "Arraste entre dois pontos da página para medir a distância (ajuste a escala na barra inferior).",
+const HINT_KEY: Record<Tool, I18nKey> = {
+  select: "hint.select",
+  hand: "hint.hand",
+  highlight: "hint.highlight",
+  underline: "hint.underline",
+  strikeout: "hint.strikeout",
+  note: "hint.note",
+  freetext: "hint.freetext",
+  ink: "hint.ink",
+  rect: "hint.rect",
+  ellipse: "hint.ellipse",
+  line: "hint.line",
+  arrow: "hint.arrow",
+  signature: "hint.signature",
+  stamp: "hint.stamp",
+  redact: "hint.redact",
+  edittext: "hint.edittext",
+  addtext: "hint.addtext",
+  overlayimg: "hint.overlayimg",
+  measure: "hint.measure",
+  link: "hint.link",
+  addfield: "hint.addfield",
 };
 
 function Shell() {
   const app = useApp();
+  const [ttsState, setTtsState] = useState<TtsState>(() => tts.snapshot());
+  useEffect(() => tts.subscribe(setTtsState), []);
   useShortcuts();
   const dropping = useFileDrop();
   const prog = app.ocrProgress ?? app.progress;
@@ -47,13 +53,35 @@ function Shell() {
     <div className={fs ? "app fullscreen" : "app"}>
       {!fs && <Ribbon />}
       {!fs && <TabBar />}
+      {!fs && app.recoveryItems.length > 0 && (
+        <div className="banner">
+          <Icon name="clock" size={18} />
+          <span>{app.t("app.recoveryBanner", { n: app.recoveryItems.length, names: app.recoveryItems.map((x) => x.name).join(", ") })}</span>
+          <button onClick={() => app.dismissRecovery()}>{app.t("app.discard")}</button>
+          <button className="primary" disabled={!!app.busy} onClick={() => app.restoreRecovery()}>{app.t("app.restore")}</button>
+        </div>
+      )}
+      {!fs && ttsState.active && (
+        <div className="banner tts-bar">
+          <Icon name="speak" size={18} />
+          <span>{app.t("app.ttsReading", { n: ttsState.page + 1, paused: ttsState.paused ? app.t("app.ttsPaused") : "" })}</span>
+          <label className="scale-pick">
+            {app.t("app.ttsSpeed")}
+            <select value={String(ttsState.rate)} onChange={(e) => tts.setRate(Number(e.target.value))}>
+              {[0.8, 1, 1.25, 1.5, 1.75].map((r) => <option key={r} value={r}>{r}×</option>)}
+            </select>
+          </label>
+          <button onClick={() => tts.togglePause()}><Icon name={ttsState.paused ? "speak" : "pause"} size={14} /> {ttsState.paused ? app.t("app.ttsResume") : app.t("app.ttsPause")}</button>
+          <button className="primary" onClick={() => tts.stop()}><Icon name="stop" size={14} /> {app.t("app.ttsStop")}</button>
+        </div>
+      )}
       {!fs && app.doc && app.scanned.length > 0 && !app.ocrProgress && (
         <div className="banner">
           <Icon name="ocr" size={18} />
           {app.scanned.length === app.doc.info.pageCount
-            ? "Este documento parece escaneado: o texto não pode ser pesquisado nem selecionado."
-            : `${app.scanned.length} página(s) parecem escaneadas.`}
-          <button className="primary" disabled={!!app.busy} onClick={() => app.runOcr("scanned")}>Reconhecer texto (OCR)</button>
+            ? app.t("app.scannedAll")
+            : app.t("app.scannedSome", { n: app.scanned.length })}
+          <button className="primary" disabled={!!app.busy} onClick={() => app.runOcr("scanned")}>{app.t("app.runOcrBtn")}</button>
         </div>
       )}
       <main className="work">
@@ -62,8 +90,8 @@ function Shell() {
       </main>
       {!fs && <StatusBar />}
       {fs && (
-        <button className="fs-exit" title="Sair da tela cheia (Esc)" onClick={() => app.toggleFullScreen(false)}>
-          <Icon name="close" size={16} /> Sair da tela cheia
+        <button className="fs-exit" title={app.t("app.fsExitTip")} onClick={() => app.toggleFullScreen(false)}>
+          <Icon name="close" size={16} /> {app.t("app.fsExit")}
         </button>
       )}
       <Dialogs />
@@ -79,8 +107,8 @@ function Shell() {
         <div className="dropzone">
           <div>
             <Icon name="open" size={40} />
-            <b>Solte para abrir</b>
-            <span>Um PDF abre · vários PDFs são combinados · imagens viram páginas</span>
+            <b>{app.t("app.dropTitle")}</b>
+            <span>{app.t("app.dropSub")}</span>
           </div>
         </div>
       )}
@@ -93,23 +121,23 @@ function TabBar() {
   const app = useApp();
   if (!app.tabs.length) return null;
   return (
-    <nav className="tabbar" role="tablist" aria-label="Documentos abertos">
-      {app.tabs.map((t) => {
-        const on = t.id === app.doc?.id;
+    <nav className="tabbar" role="tablist" aria-label={app.t("app.openDocsAria")}>
+      {app.tabs.map((x) => {
+        const on = x.id === app.doc?.id;
         return (
-          <div key={t.id} className={on ? "doctab on" : "doctab"} role="tab" aria-selected={on} title={t.path ?? t.name}
-            onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); app.closeTab(t.id); } }}>
-            <button className="dt-name" onClick={() => app.switchTab(t.id)}>
-              {t.dirty && <span className="dt-dot" aria-label="alterado">•</span>}
-              {t.name}
+          <div key={x.id} className={on ? "doctab on" : "doctab"} role="tab" aria-selected={on} title={x.path ?? x.name}
+            onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); app.closeTab(x.id); } }}>
+            <button className="dt-name" onClick={() => app.switchTab(x.id)}>
+              {x.dirty && <span className="dt-dot" aria-label={app.t("app.dirtyAria")}>•</span>}
+              {x.name}
             </button>
-            <button className="dt-close" title="Fechar (Ctrl+W)" aria-label={`Fechar ${t.name}`} onClick={() => app.closeTab(t.id)}>
+            <button className="dt-close" title={app.t("app.closeTabTip")} aria-label={app.t("app.closeTabAria", { name: x.name })} onClick={() => app.closeTab(x.id)}>
               <Icon name="close" size={13} />
             </button>
           </div>
         );
       })}
-      <button className="dt-new" title="Abrir outro PDF (Ctrl+O)" aria-label="Abrir outro PDF" onClick={() => app.openFile()}>
+      <button className="dt-new" title={app.t("app.newTabTip")} aria-label={app.t("app.newTabAria")} onClick={() => app.openFile()}>
         <Icon name="plus" size={16} />
       </button>
     </nav>
@@ -124,27 +152,27 @@ function StatusBar() {
   const n = app.doc.info.pageCount;
   return (
     <footer className="status">
-      <span className="hint">{HINT[app.tool]}</span>
+      <span className="hint">{app.t(HINT_KEY[app.tool])}</span>
       <span className="grow" />
       {app.tool === "measure" && (
-        <label className="scale-pick" title="Escala da régua (para plantas e desenhos técnicos)">
-          Escala
+        <label className="scale-pick" title={app.t("app.scaleTip")}>
+          {app.t("app.scale")}
           <select value={String(app.measureScale)} onChange={(e) => app.setMeasureScale(Number(e.target.value))}>
             {[1, 10, 20, 25, 50, 75, 100, 125, 200, 250, 500].map((s) => <option key={s} value={s}>1:{s}</option>)}
           </select>
         </label>
       )}
-      <button title="Página anterior" disabled={app.page === 0} onClick={() => app.goTo(app.page - 1)}><Icon name="chevL" size={16} /></button>
+      <button title={app.t("app.prevPage")} disabled={app.page === 0} onClick={() => app.goTo(app.page - 1)}><Icon name="chevL" size={16} /></button>
       <form onSubmit={(e) => { e.preventDefault(); const p = Number(pg) - 1; if (p >= 0 && p < n) app.goTo(p); }}>
-        <input className="pgnum" value={pg} onChange={(e) => setPg(e.target.value)} aria-label="Página" /> / {n}
+        <input className="pgnum" value={pg} onChange={(e) => setPg(e.target.value)} aria-label={app.t("common.page")} /> / {n}
       </form>
-      <button title="Próxima página" disabled={app.page >= n - 1} onClick={() => app.goTo(app.page + 1)}><Icon name="chevR" size={16} /></button>
-      <button title="Uma página" className={app.layout === "single" ? "on" : ""} onClick={() => app.setLayout("single")}><Icon name="onePage" size={16} /></button>
-      <button title="Duas páginas" className={app.layout === "double" ? "on" : ""} onClick={() => app.setLayout("double")}><Icon name="twoPages" size={16} /></button>
-      <button title="Tela cheia (F11)" onClick={() => app.toggleFullScreen(true)}><Icon name="fullscreen" size={16} /></button>
-      <button title="Reduzir" onClick={() => app.setZoom((z) => z / 1.2)}><Icon name="zoomOut" size={16} /></button>
+      <button title={app.t("app.nextPage")} disabled={app.page >= n - 1} onClick={() => app.goTo(app.page + 1)}><Icon name="chevR" size={16} /></button>
+      <button title={app.t("app.onePage")} className={app.layout === "single" ? "on" : ""} onClick={() => app.setLayout("single")}><Icon name="onePage" size={16} /></button>
+      <button title={app.t("app.twoPages")} className={app.layout === "double" ? "on" : ""} onClick={() => app.setLayout("double")}><Icon name="twoPages" size={16} /></button>
+      <button title={app.t("app.fullscreenTip")} onClick={() => app.toggleFullScreen(true)}><Icon name="fullscreen" size={16} /></button>
+      <button title={app.t("cmd.zoomOut")} onClick={() => app.setZoom((z) => z / 1.2)}><Icon name="zoomOut" size={16} /></button>
       <span className="zoom">{Math.round(app.zoom * 100)}%</span>
-      <button title="Ampliar" onClick={() => app.setZoom((z) => z * 1.2)}><Icon name="zoomIn" size={16} /></button>
+      <button title={app.t("cmd.zoomIn")} onClick={() => app.setZoom((z) => z * 1.2)}><Icon name="zoomIn" size={16} /></button>
     </footer>
   );
 }

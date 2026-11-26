@@ -79,6 +79,22 @@ const P: Record<string, JSX.Element> = {
   ruler: <><path d="M3 15L15 3l6 6L9 21z" /><path d="M7 11l2 2M10 8l2 2M13 5l2 2" /></>,
   readMode: <><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" /></>,
   batch: <><rect x="3" y="5" width="12" height="14" rx="1" /><path d="M7 3h10a2 2 0 012 2v12" /><path d="M7 10h4M7 13h4" /></>,
+  smartRedact: <><rect x="3" y="9" width="13" height="6" fill="currentColor" /><path d="M3 5h9M3 19h11" /><path d="M19 4l1 2.5L22.5 7.5 20 8.5 19 11l-1-2.5L15.5 7.5 18 6.5z" /></>,
+  bates: <><rect x="3" y="5" width="18" height="14" rx="1.5" /><path d="M6.5 10h3M6.5 14h3M12 10h5.5M12 14h5.5" /></>,
+  pageLabel: <><path d="M4 7h11l5 5-5 5H4z" /><circle cx="8.5" cy="12" r="1.2" /></>,
+  link: <><path d="M10 14a4 4 0 005.6 0l2.8-2.8a4 4 0 00-5.6-5.6L11 7.4" /><path d="M14 10a4 4 0 00-5.6 0L5.6 12.8a4 4 0 005.6 5.6L13 16.6" /></>,
+  attachments: <><path d="M21 11.5l-8.8 8.8a5 5 0 01-7.1-7.1l9.2-9.2a3.3 3.3 0 014.7 4.7l-9.2 9.2a1.7 1.7 0 01-2.4-2.4l8.5-8.5" /></>,
+  layers: <><path d="M12 3l9 4.5-9 4.5-9-4.5z" /><path d="M3 12l9 4.5 9-4.5" /><path d="M3 16.5L12 21l9-4.5" /></>,
+  sparkle: <><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" /><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z" /></>,
+  exportSummary: <><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v4h4M9 12h6M9 15h4M16 17l2.5 2.5L21 17" /></>,
+  certSign: <><rect x="3" y="4" width="18" height="13" rx="1.5" /><path d="M7 9h6M7 12h4" /><circle cx="16.5" cy="14" r="3" /><path d="M15 16.5L14 21l2.5-1.5L19 21l-1-4.5" /></>,
+  certVerify: <><path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z" /><path d="M8.5 12l2.3 2.3 4.7-4.8" /></>,
+  formField: <><rect x="3" y="6" width="18" height="12" rx="1.5" /><path d="M7 10v4M11 12h6" /></>,
+  autoForm: <><rect x="3" y="6" width="14" height="12" rx="1.5" /><path d="M6 10h6M6 14h8" /><path d="M19 4l.8 2.2L22 7l-2.2.8L19 10l-.8-2.2L16 7l2.2-.8z" /></>,
+  htmlPdf: <><path d="M8 7l-4 5 4 5M16 7l4 5-4 5M13 5l-2 14" /></>,
+  speak: <><path d="M4 9v6h4l5 4V5L8 9z" /><path d="M16.5 8.5a5 5 0 010 7M19 6a8.5 8.5 0 010 12" /></>,
+  pause: <><path d="M8 5v14M16 5v14" /></>,
+  stop: <><rect x="6" y="6" width="12" height="12" rx="1" /></>,
 };
 
 export function Icon({ name, size = 20 }: { name: string; size?: number }) {

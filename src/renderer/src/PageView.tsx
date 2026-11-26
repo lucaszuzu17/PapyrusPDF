@@ -1,13 +1,14 @@
 // Uma página: imagem renderizada pelo motor + camada de interação por cima.
 import { useEffect, useMemo, useRef, useState, type PointerEvent as RPE } from "react";
-import { engine, type AnnotInfo, type EditTextResult, type FieldInfo, type PageInfo, type Point, type Quad, type Rect, type TextBlock, type TextLine } from "./api.ts";
+import { formatDecimal, type UiLang } from "../../shared/i18n.ts";
+import { engine, type AnnotInfo, type EditTextResult, type FieldInfo, type LinkInfo, type NewFieldKind, type PageInfo, type Point, type Quad, type Rect, type TextBlock, type TextLine } from "./api.ts";
 import { useApp, type RGB, type Tool } from "./state.tsx";
 import { Icon } from "./icons.tsx";
 import { dataUrlBytes } from "./images.ts";
 import { cssFontFamily, fontStyle, isSymbolicFont, normalizePdfText } from "../../engine/fontname.ts";
 
 const TEXT_TOOLS: Tool[] = ["select", "highlight", "underline", "strikeout", "edittext"];
-const DRAG_TOOLS: Tool[] = ["freetext", "rect", "ellipse", "line", "arrow", "redact", "overlayimg", "measure"];
+const DRAG_TOOLS: Tool[] = ["freetext", "rect", "ellipse", "line", "arrow", "redact", "overlayimg", "measure", "link", "addfield"];
 const EDIT_COLORS: RGB[] = [[0, 0, 0], [0.1, 0.25, 0.7], [0.8, 0.1, 0.1], [0.1, 0.5, 0.2], [0.4, 0.4, 0.4]];
 
 interface FlatChar { c: string; quad: Quad; line: TextLine }
@@ -45,6 +46,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
   const [blocks, setBlocks] = useState<TextBlock[] | null>(null);
   const [annots, setAnnots] = useState<AnnotInfo[]>([]);
   const [fields, setFields] = useState<FieldInfo[]>([]);
+  const [links, setLinks] = useState<LinkInfo[]>([]);
   const [drag, setDrag] = useState<{ a: Point; b: Point } | null>(null);
   const [ink, setInk] = useState<Point[] | null>(null);
   const [sel, setSel] = useState<[number, number] | null>(null);
@@ -85,6 +87,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     let dead = false;
     engine.annotations(index).then((a) => !dead && setAnnots(a.filter((x) => x.kind !== "Widget" && x.kind !== "Link"))).catch(() => {});
     engine.fields(index).then((f) => !dead && setFields(f)).catch(() => {});
+    engine.links(index).then((l) => !dead && setLinks(l)).catch(() => {});
     return () => { dead = true; };
   }, [visible, rev, index, doc]);
 
@@ -135,7 +138,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
   const markSelection = async (kind: "Highlight" | "Underline" | "StrikeOut", color: RGB) => {
     const quads = lineQuads(range.filter((c) => c.c.trim()));
     setSel(null);
-    if (quads.length) await app.mutate("Anotando…", () => engine.addAnnotation(index, { kind, quads, color }));
+    if (quads.length) await app.mutate(app.t("common.annotating"), () => engine.addAnnotation(index, { kind, quads, color }));
   };
 
   // ---------- ponteiro ----------
@@ -165,7 +168,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     const p = toPt(e);
     if (ink) {
       const pts = ink; setInk(null);
-      if (pts.length > 1) await app.mutate("Desenhando…", () => engine.addAnnotation(index, { kind: "Ink", strokes: [pts], color: app.color }));
+      if (pts.length > 1) await app.mutate(app.t("common.drawing"), () => engine.addAnnotation(index, { kind: "Ink", strokes: [pts], color: app.color }));
       return;
     }
     const d = drag; setDrag(null);
@@ -185,21 +188,21 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
         else setSel(null);
         break;
       case "note": {
-        const text = await app.ask({ kind: "prompt", title: "Nova nota", message: "Texto do comentário:", multiline: true, value: "" });
-        if (text) await app.mutate("Anotando…", () => engine.addAnnotation(index, { kind: "Text", at: [p[0] - 10, p[1] - 10], contents: text, color: app.color }));
+        const text = await app.ask({ kind: "prompt", title: app.t("pv.newNoteTitle"), message: app.t("pv.newNoteMsg"), multiline: true, value: "" });
+        if (text) await app.mutate(app.t("common.annotating"), () => engine.addAnnotation(index, { kind: "Text", at: [p[0] - 10, p[1] - 10], contents: text, color: app.color }));
         break;
       }
       case "freetext":
         setFreeText({ rect: big ? r : [p[0], p[1], p[0] + 200, p[1] + 28], text: "" });
         break;
       case "rect": case "ellipse":
-        if (big) await app.mutate("Desenhando…", () => engine.addAnnotation(index, { kind: tool === "rect" ? "Square" : "Circle", rect: r, color: app.color }));
+        if (big) await app.mutate(app.t("common.drawing"), () => engine.addAnnotation(index, { kind: tool === "rect" ? "Square" : "Circle", rect: r, color: app.color }));
         break;
       case "line": case "arrow":
-        if (moved.current) await app.mutate("Desenhando…", () => engine.addAnnotation(index, { kind: "Line", from: d.a, to: p, arrow: tool === "arrow", color: app.color }));
+        if (moved.current) await app.mutate(app.t("common.drawing"), () => engine.addAnnotation(index, { kind: "Line", from: d.a, to: p, arrow: tool === "arrow", color: app.color }));
         break;
       case "redact":
-        if (big) await app.mutate("Marcando…", () => engine.addAnnotation(index, { kind: "Redact", rect: r }));
+        if (big) await app.mutate(app.t("common.marking"), () => engine.addAnnotation(index, { kind: "Redact", rect: r }));
         break;
       case "signature": await placeSignature(p); break;
       case "stamp": await placeStamp(p); break;
@@ -207,6 +210,12 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
       case "measure":
         if (moved.current) setMeasured({ a: d.a, b: p });
         else setMeasured(null);
+        break;
+      case "link":
+        if (big) await createLinkAt(r);
+        break;
+      case "addfield":
+        if (big) await createFieldAt(r);
         break;
       case "addtext": {
         const w = Math.max(180, info.x + info.width - p[0] - 24);
@@ -277,9 +286,82 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     }
   };
 
+  const createFieldAt = async (rect: Rect) => {
+    const v = await app.askForm({
+      title: app.t("pv.createFieldTitle"), okLabel: app.t("pv.createFieldOk"),
+      fields: [
+        { id: "kind", label: app.t("pv.fieldKind"), type: "select", value: "text", span: 3, options: [
+          { value: "text", label: app.t("pv.fieldText") },
+          { value: "multiline", label: app.t("pv.fieldMultiline") },
+          { value: "checkbox", label: app.t("pv.fieldCheckbox") },
+          { value: "combobox", label: app.t("pv.fieldCombobox") },
+          { value: "signature", label: app.t("pv.fieldSignature") },
+        ] },
+        { id: "name", label: app.t("pv.fieldName"), type: "text", value: `${app.t("pv.fieldDefaultPrefix")}${fields.length + 1}`, span: 3 },
+        { id: "options", label: app.t("pv.fieldOptions"), type: "text", value: app.t("pv.fieldOptionsDefault"), span: 6,
+          showIf: (f) => f.kind === "combobox" },
+      ],
+      validate: (f) => (String(f.name).trim() ? null : app.t("pv.fieldNameRequired")),
+    });
+    if (!v) return;
+    const isMulti = v.kind === "multiline";
+    const kind: NewFieldKind = isMulti ? "text" : (v.kind as NewFieldKind);
+    const options = kind === "combobox"
+      ? String(v.options).split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    const ok = await app.mutate(app.t("pv.creatingField"), () => engine.createField({
+      page: index, kind, name: String(v.name).trim(), rect, multiline: isMulti, options,
+    }));
+    if (ok) app.notify(app.t("pv.fieldCreated", { name: String(v.name).trim() }));
+  };
+
+  const createLinkAt = async (rect: Rect) => {
+    const total = app.doc?.info.pageCount ?? 1;
+    const v = await app.askForm({
+      title: app.t("pv.createLinkTitle"), okLabel: app.t("pv.createLinkOk"),
+      fields: [
+        { id: "kind", label: app.t("pv.linkDest"), type: "select", value: "page", options: [
+          { value: "page", label: app.t("pv.linkPage") },
+          { value: "url", label: app.t("pv.linkUrl") },
+        ] },
+        { id: "page", label: app.t("pv.linkPageNum", { total }), type: "number", value: String(Math.min(total, index + 2)),
+          showIf: (f) => f.kind === "page" },
+        { id: "uri", label: app.t("pv.linkUri"), type: "text", value: "https://",
+          showIf: (f) => f.kind === "url", placeholder: app.t("pv.linkUriPh") },
+      ],
+      validate: (f) => {
+        if (f.kind === "page") {
+          const n = Number(String(f.page).trim());
+          return Number.isInteger(n) && n >= 1 && n <= total ? null : app.t("pv.linkPageInvalid", { total });
+        }
+        return /^(https?:\/\/|mailto:)/i.test(String(f.uri).trim()) ? null : app.t("pv.linkUriInvalid");
+      },
+    });
+    if (!v) return;
+    const target = v.kind === "page"
+      ? { page: Number(String(v.page).trim()) - 1 }
+      : { uri: String(v.uri).trim() };
+    const ok = await app.mutate(app.t("pv.insertingLink"), () => engine.addLink(index, rect, target));
+    if (ok) app.notify(app.t("pv.linkCreated"));
+  };
+
+  const openLink = async (l: LinkInfo) => {
+    if (!l.isExternal && l.targetPage >= 0) {
+      app.goTo(l.targetPage);
+      return;
+    }
+    if (l.isExternal) {
+      const ok = await app.ask({
+        kind: "confirm", title: app.t("pv.openExtTitle"), okLabel: app.t("pv.openExtOk"),
+        message: app.t("pv.openExtMsg", { uri: l.uri }),
+      });
+      if (ok !== null) await window.papiro.openExternal(l.uri);
+    }
+  };
+
   const placeOverlayImage = async (r: Rect, big: boolean, p: Point) => {
     const img = app.overlayImg;
-    if (!img) { app.notify("Escolha uma imagem em Editar → Inserir imagem."); return; }
+    if (!img) { app.notify(app.t("pv.needOverlayImg")); return; }
     let rect = r;
     if (!big) {
       const w = Math.min(200, info.width - 24);
@@ -288,13 +370,13 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
       const y = Math.min(Math.max(p[1] - h / 2, info.y + 4), info.y + info.height - h - 4);
       rect = [x, y, x + w, y + h];
     }
-    await app.mutate("Inserindo imagem…", () => engine.addImageToPage(index, rect, img.bytes));
+    await app.mutate(app.t("pv.insertingImg"), () => engine.addImageToPage(index, rect, img.bytes));
   };
 
   const placeSignature = async (p: Point) => {
     let sig = app.signature;
     if (!sig) {
-      sig = await app.ask({ kind: "signature", title: "Criar assinatura" });
+      sig = await app.ask({ kind: "signature", title: app.t("ribbon.newSigTitle") });
       if (!sig) return;
       app.setSignature(sig);
     }
@@ -303,17 +385,17 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     await img.decode();
     const w = 160, h = (w * img.naturalHeight) / img.naturalWidth;
     const png = Uint8Array.from(atob(sig.split(",")[1]), (c) => c.charCodeAt(0));
-    await app.mutate("Assinando…", () => engine.addAnnotation(index, { kind: "Stamp", rect: [p[0] - w / 2, p[1] - h / 2, p[0] + w / 2, p[1] + h / 2], png }));
+    await app.mutate(app.t("pv.signing"), () => engine.addAnnotation(index, { kind: "Stamp", rect: [p[0] - w / 2, p[1] - h / 2, p[0] + w / 2, p[1] + h / 2], png }));
   };
 
   const placeStamp = async (p: Point) => {
     const st = app.stamp;
-    if (!st) { app.notify("Escolha um carimbo em Comentar → Carimbo."); return; }
+    if (!st) { app.notify(app.t("pv.needStamp")); return; }
     // mantém o carimbo inteiro dentro da página
     const w = Math.min(st.width, info.width - 8), h = (w * st.height) / st.width;
     const x = Math.min(Math.max(p[0] - w / 2, info.x + 4), info.x + info.width - w - 4);
     const y = Math.min(Math.max(p[1] - h / 2, info.y + 4), info.y + info.height - h - 4);
-    await app.mutate("Carimbando…", () => engine.addAnnotation(index, { kind: "Stamp", rect: [x, y, x + w, y + h], png: dataUrlBytes(st.png) }));
+    await app.mutate(app.t("pv.stamping"), () => engine.addAnnotation(index, { kind: "Stamp", rect: [x, y, x + w, y + h], png: dataUrlBytes(st.png) }));
   };
 
   const commitEdit = async () => {
@@ -331,7 +413,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     const effFont = styledFontName(ed.font, ed.bold, ed.italic, ed.origBold, ed.origItalic);
     const lh = ed.block && Math.abs(ed.size - blockStyle(ed.block).size) <= 0.2 ? ed.lineHeight : ed.size * 1.22;
     const out: { fonts: EditTextResult["fonts"] | null } = { fonts: null };
-    const ok = await app.mutate(ed.erase ? "Editando texto…" : "Inserindo texto…", async () => {
+    const ok = await app.mutate(ed.erase ? app.t("pv.editingText") : app.t("pv.insertingText"), async () => {
       const r = await engine.editText({
         page: index, area: ed.area, areas: ed.areas, text: ed.text,
         origin: ed.origin, size: ed.size, color: ed.color, font: effFont,
@@ -345,13 +427,13 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     if (ok && f) {
       const name = fontStyle(effFont).family;
       if ((f.substituted ?? 0) > 0) {
-        app.notify(`Atenção: ${f.substituted} caractere(s) não têm suporte em nenhuma fonte disponível e foram substituídos por “?”.`);
+        app.notify(app.t("pv.fontSubst", { n: f.substituted ?? 0 }));
       } else if (ed.erase && f.system && !f.fallback) {
-        app.notify(`Algumas letras não estavam na fonte embutida no PDF; vieram da ${f.system} instalada no Windows, que foi incorporada ao arquivo.`);
+        app.notify(app.t("pv.fontSystem", { font: f.system }));
       } else if (ed.erase && f.fallback && (f.original || f.system)) {
-        app.notify(`Algumas letras não existem na fonte ${name} nem no Windows e saíram numa fonte padrão do PDF.`);
+        app.notify(app.t("pv.fontFallbackPartial", { name }));
       } else if (ed.erase && f.fallback) {
-        app.notify(`A fonte ${name} não pôde ser reaproveitada neste PDF; o texto saiu numa fonte padrão parecida.`);
+        app.notify(app.t("pv.fontFallbackAll", { name }));
       }
     }
   };
@@ -359,7 +441,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
   const commitFreeText = async () => {
     if (!freeText) return;
     const ft = freeText; setFreeText(null);
-    if (ft.text.trim()) await app.mutate("Anotando…", () => engine.addAnnotation(index, { kind: "FreeText", rect: ft.rect, contents: ft.text, size: 12, color: app.color }));
+    if (ft.text.trim()) await app.mutate(app.t("common.annotating"), () => engine.addAnnotation(index, { kind: "FreeText", rect: ft.rect, contents: ft.text, size: 12, color: app.color }));
   };
 
   // apagar anotação selecionada com Delete
@@ -368,7 +450,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
     const h = (e: KeyboardEvent) => {
       if ((e.key === "Delete" || e.key === "Backspace") && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
         const id = selAnnot; setSelAnnot(null);
-        app.mutate("Excluindo…", () => engine.deleteAnnotation(index, id));
+        app.mutate(app.t("common.deleting"), () => engine.deleteAnnotation(index, id));
       }
     };
     window.addEventListener("keydown", h);
@@ -396,39 +478,71 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
   return (
     <div className={pageClass} style={{ width: W, height: H }} data-page={index}>
       <canvas ref={canvas} style={{ width: W, height: H }} />
-      {!rendered && <div className="page-loading">Carregando página {index + 1}…</div>}
+      {!rendered && <div className="page-loading">{app.t("pv.loadingPage", { n: index + 1 })}</div>}
       <div ref={overlay} className="overlay" style={{ cursor }} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}>
         {hits.flatMap((h) => h.quads.map((q, k) => (
           <div key={`${h.i}-${k}`} className={h.i === app.search.active ? "hit active" : "hit"} style={box(qbox(q))} />
         )))}
         {lineQuads(range).map((q, k) => <div key={k} className="tsel" style={box(qbox(q))} />)}
         {tool === "edittext" && !editing && (blocks ?? []).map((b, k) => <div key={k} className="eblock" style={box(b.bbox)} />)}
-        {tool === "redact" && annots.filter((a) => a.kind === "Redact").map((a) => <div key={a.id} className="redmark" style={box(a.rect)} />)}
+        {tool === "redact" && annots.filter((a) => a.kind === "Redact").map((a) => (
+          <div key={a.id} className="redmark" style={box(a.rect)}>
+            {a.contents && <span className="redmark-lbl">{a.contents}</span>}
+          </div>
+        ))}
+        {tool === "select" && !sel && links.map((l) => (
+          <a key={l.index} className="link-box" style={box(l.rect)}
+            title={l.isExternal ? app.t("pv.linkOpenExtTip", { uri: l.uri }) : l.targetPage >= 0 ? app.t("pv.linkGoPageTip", { n: l.targetPage + 1 }) : l.uri}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); openLink(l); }} />
+        ))}
+        {tool === "link" && links.map((l) => (
+          <div key={l.index} className="link-edit" style={box(l.rect)}
+            title={l.isExternal ? l.uri : `${app.t("common.page")} ${l.targetPage + 1}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={async (e) => {
+              e.stopPropagation();
+              const target = l.isExternal ? l.uri : app.t("pv.delLinkPageTarget", { n: l.targetPage + 1 });
+              const ok = await app.ask({ kind: "confirm", title: app.t("pv.delLinkTitle"), message: app.t("pv.delLinkMsg", { target }) });
+              if (ok !== null) await app.mutate(app.t("pv.deletingLink"), () => engine.deleteLink(index, l.index));
+            }} />
+        ))}
         {selAnn && (
           <div className="asel" style={box(selAnn.rect)}>
             <div className="mini" onPointerDown={(e) => e.stopPropagation()}>
               {(selAnn.kind === "Text" || selAnn.kind === "FreeText") && (
                 <button onClick={async () => {
-                  const t = await app.ask({ kind: "prompt", title: "Editar comentário", value: selAnn.contents, multiline: true });
-                  if (t !== null) await app.mutate("Editando…", () => engine.setAnnotationContents(index, selAnn.id, t));
-                }}>Editar</button>
+                  const t = await app.ask({ kind: "prompt", title: app.t("pv.editCommentTitle"), value: selAnn.contents, multiline: true });
+                  if (t !== null) await app.mutate(app.t("common.editing"), () => engine.setAnnotationContents(index, selAnn.id, t));
+                }}>{app.t("common.edit")}</button>
               )}
-              <button onClick={() => { setSelAnnot(null); app.mutate("Excluindo…", () => engine.deleteAnnotation(index, selAnn.id)); }}>
-                <Icon name="trash" size={14} /> Excluir
+              <button onClick={() => { setSelAnnot(null); app.mutate(app.t("common.deleting"), () => engine.deleteAnnotation(index, selAnn.id)); }}>
+                <Icon name="trash" size={14} /> {app.t("common.delete")}
               </button>
             </div>
           </div>
         )}
-        {fields.filter((f) => !f.readOnly).map((f) => <Field key={f.id} f={f} index={index} style={box(f.rect)} zoom={zoom} />)}
+        {tool !== "addfield" && fields.filter((f) => !f.readOnly).map((f) => <Field key={f.id} f={f} index={index} style={box(f.rect)} zoom={zoom} />)}
+        {tool === "addfield" && fields.map((f) => (
+          <div key={f.id} className="field-edit" style={box(f.rect)} title={app.t("pv.fieldEditTip", { name: f.name, type: f.type })}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={async (e) => {
+              e.stopPropagation();
+              const ok = await app.ask({ kind: "confirm", title: app.t("pv.removeFieldTitle"), message: app.t("pv.removeFieldMsg", { name: f.name }) });
+              if (ok !== null) await app.mutate(app.t("pv.removingField"), () => engine.deleteField(index, f.id));
+            }}>
+            <span>{f.name}</span>
+          </div>
+        ))}
         {range.length > 0 && !drag && tool === "select" && (() => {
           const last = qbox(range[range.length - 1].quad);
           const [x, y] = toPx(last[2], last[3]);
           return (
             <div className="mini floating" style={{ left: Math.min(x, W - 260), top: y + 6 }} onPointerDown={(e) => e.stopPropagation()}>
-              <button onClick={() => { navigator.clipboard.writeText(selectedText()); app.notify("Texto copiado."); }}><Icon name="copy" size={14} /> Copiar</button>
-              <button onClick={() => markSelection("Highlight", app.color)}>Realçar</button>
-              <button onClick={() => markSelection("Underline", app.color)}>Sublinhar</button>
-              <button onClick={() => markSelection("StrikeOut", [0.85, 0, 0])}>Tachar</button>
+              <button onClick={() => { navigator.clipboard.writeText(selectedText()); app.notify(app.t("pv.textCopied")); }}><Icon name="copy" size={14} /> {app.t("pv.copy")}</button>
+              <button onClick={() => markSelection("Highlight", app.color)}>{app.t("cmd.hl")}</button>
+              <button onClick={() => markSelection("Underline", app.color)}>{app.t("cmd.ul")}</button>
+              <button onClick={() => markSelection("StrikeOut", [0.85, 0, 0])}>{app.t("cmd.so")}</button>
             </div>
           );
         })()}
@@ -448,7 +562,7 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
           const pt = Math.hypot(activeMeasure.b[0] - activeMeasure.a[0], activeMeasure.b[1] - activeMeasure.a[1]);
           if (pt < 1) return null;
           const mm = pt * (25.4 / 72) * app.measureScale;
-          const label = formatMeasure(mm, app.measureScale);
+          const label = formatMeasure(mm, app.measureScale, app.lang);
           return (
             <>
               {!drag && (
@@ -507,36 +621,36 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
             <>
               <div className="etbar" style={{ left: Math.max(4, Math.min(tx, W - 320)), top: Math.max(4, ty - 36) }}
                 onMouseDown={keepFocus} onPointerDown={(e) => e.stopPropagation()}>
-                <button type="button" title="Diminuir fonte" onClick={() => setEditing(updateWithAutoWidth({ ...editing, size: Math.max(6, Math.round((editing.size - 1) * 10) / 10) }))}>A−</button>
+                <button type="button" title={app.t("pv.fontDec")} onClick={() => setEditing(updateWithAutoWidth({ ...editing, size: Math.max(6, Math.round((editing.size - 1) * 10) / 10) }))}>A−</button>
                 <span className="et-sz">{Math.round(editing.size)}pt</span>
-                <button type="button" title="Aumentar fonte" onClick={() => setEditing(updateWithAutoWidth({ ...editing, size: Math.min(96, Math.round((editing.size + 1) * 10) / 10) }))}>A+</button>
+                <button type="button" title={app.t("pv.fontInc")} onClick={() => setEditing(updateWithAutoWidth({ ...editing, size: Math.min(96, Math.round((editing.size + 1) * 10) / 10) }))}>A+</button>
                 <span className="et-sep" />
-                <button type="button" title="Negrito" className={editing.bold ? "on" : ""} onClick={() => setEditing(updateWithAutoWidth({ ...editing, bold: !editing.bold }))}><b>N</b></button>
-                <button type="button" title="Itálico" className={editing.italic ? "on" : ""} onClick={() => setEditing(updateWithAutoWidth({ ...editing, italic: !editing.italic }))}><i>I</i></button>
+                <button type="button" title={app.t("pv.bold")} className={editing.bold ? "on" : ""} onClick={() => setEditing(updateWithAutoWidth({ ...editing, bold: !editing.bold }))}><b>{app.t("pv.boldSym")}</b></button>
+                <button type="button" title={app.t("pv.italic")} className={editing.italic ? "on" : ""} onClick={() => setEditing(updateWithAutoWidth({ ...editing, italic: !editing.italic }))}><i>{app.t("pv.italicSym")}</i></button>
                 <span className="et-sep" />
-                <button type="button" title="Alinhar à esquerda" className={editing.align === "left" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "left" })}>⯇</button>
-                <button type="button" title="Centralizar" className={editing.align === "center" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "center" })}>≡</button>
-                <button type="button" title="Alinhar à direita" className={editing.align === "right" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "right" })}>⯈</button>
+                <button type="button" title={app.t("pv.alignLeft")} className={editing.align === "left" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "left" })}>⯇</button>
+                <button type="button" title={app.t("pv.alignCenter")} className={editing.align === "center" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "center" })}>≡</button>
+                <button type="button" title={app.t("pv.alignRight")} className={editing.align === "right" ? "on" : ""} onClick={() => setEditing({ ...editing, align: "right" })}>⯈</button>
                 <span className="et-sep" />
                 {EDIT_COLORS.map((c) => (
-                  <button key={c.join()} type="button" title="Cor do texto"
+                  <button key={c.join()} type="button" title={app.t("pv.textColor")}
                     className={c.join() === editing.color.join() ? "et-sw on" : "et-sw"}
                     style={{ background: rgbCss(c) }}
                     onClick={() => setEditing({ ...editing, color: c })} />
                 ))}
                 <span className="et-sep" />
-                <button type="button" className="et-ok" title="Confirmar (Ctrl+Enter)" onClick={commitEdit}>✓</button>
-                <button type="button" title="Cancelar (Esc)" onClick={() => setEditing(null)}>✕</button>
+                <button type="button" className="et-ok" title={app.t("pv.confirmTip")} onClick={commitEdit}>✓</button>
+                <button type="button" title={app.t("pv.cancelTip")} onClick={() => setEditing(null)}>✕</button>
               </div>
               <div className="editor-wrap" style={box(edRect)} onPointerDown={(e) => e.stopPropagation()}>
                 <textarea className={overflows ? "editor overflow" : "editor"} autoFocus value={editing.text}
-                  placeholder={editing.erase ? undefined : "Digite o texto (Ctrl+Enter confirma)"}
+                  placeholder={editing.erase ? undefined : app.t("pv.addTextPh")}
                   style={{ width: "100%", height: "100%", fontSize: editing.size * zoom, lineHeight: `${lh * zoom}px`, textAlign: editing.align,
                     fontFamily: fontFam, fontWeight: editing.bold ? 700 : 400, fontStyle: editing.italic ? "italic" : "normal", color: rgbCss(editing.color) }}
                   onChange={(e) => setEditing(updateWithAutoWidth({ ...editing, text: e.target.value }))}
                   onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); if (e.key === "Enter" && e.ctrlKey) commitEdit(); }}
                   onBlur={commitEdit} />
-                <div className="editor-grip-e" title="Arraste para esticar a largura (duplo clique expande)"
+                <div className="editor-grip-e" title={app.t("pv.gripEastTip")}
                   onMouseDown={keepFocus}
                   onPointerDown={startResize("e")}
                   onDoubleClick={(e) => {
@@ -545,20 +659,20 @@ export function PageView({ index, info, visible }: { index: number; info: PageIn
                     const nextW = boxW < editing.freeWidth - 4 ? editing.freeWidth : pageMaxW;
                     setEditing({ ...editing, maxWidth: nextW, manualWidth: true });
                   }} />
-                <div className="editor-grip-se" title="Arraste para redimensionar a área"
+                <div className="editor-grip-se" title={app.t("pv.gripSeTip")}
                   onMouseDown={keepFocus}
                   onPointerDown={startResize("se")} />
               </div>
               {overflows && (
                 <div className="editor-warn" style={{ left: wx, top: wy }}>
-                  Texto ultrapassa a área original — arraste a borda direita para esticar
+                  {app.t("pv.overflowWarn")}
                 </div>
               )}
             </>
           );
         })()}
         {freeText && (
-          <textarea className="editor ft" autoFocus value={freeText.text} placeholder="Digite e clique fora para confirmar"
+          <textarea className="editor ft" autoFocus value={freeText.text} placeholder={app.t("pv.freeTextPh")}
             style={{ ...box(freeText.rect), fontSize: 12 * zoom, color: rgbCss(app.color) }}
             onPointerDown={(e) => e.stopPropagation()}
             onChange={(e) => setFreeText({ ...freeText, text: e.target.value })}
@@ -574,7 +688,7 @@ function Field({ f, index, style, zoom }: { f: FieldInfo; index: number; style: 
   const app = useApp();
   const [v, setV] = useState(f.value);
   useEffect(() => setV(f.value), [f.value]);
-  const set = (val: string | boolean) => app.mutate("Preenchendo…", () => engine.setField(index, f.id, val));
+  const set = (val: string | boolean) => app.mutate(app.t("pv.filling"), () => engine.setField(index, f.id, val));
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
   const fs = Math.max(9, Math.min(14, (Number(style.height) / zoom) * 0.65)) * zoom;
   if (f.type === "checkbox" || f.type === "radiobutton") {
@@ -618,12 +732,12 @@ function styledFontName(baseFont: string, bold: boolean, italic: boolean, origBo
   return fam;
 }
 
-function formatMeasure(mm: number, scale: number): string {
+function formatMeasure(mm: number, scale: number, lang: UiLang): string {
   const s = mm >= 1000
-    ? `${(mm / 1000).toFixed(2).replace(".", ",")} m`
+    ? `${formatDecimal(mm / 1000, 2, lang)} m`
     : mm >= 10
-      ? `${(mm / 10).toFixed(2).replace(".", ",")} cm (${mm.toFixed(1).replace(".", ",")} mm)`
-      : `${mm.toFixed(1).replace(".", ",")} mm`;
+      ? `${formatDecimal(mm / 10, 2, lang)} cm (${formatDecimal(mm, 1, lang)} mm)`
+      : `${formatDecimal(mm, 1, lang)} mm`;
   return scale > 1 ? `${s} · 1:${scale}` : s;
 }
 

@@ -1,4 +1,5 @@
 // Força de senha e gerador de senhas fortes (sem dependências: testável no Node).
+import { translate, type UiLang } from "../../shared/i18n.ts";
 
 export interface Strength { score: 0 | 1 | 2 | 3 | 4; label: string; hint: string; bits: number }
 
@@ -10,7 +11,7 @@ const COMMON = new Set([
 const SEQUENCES = ["abcdefghijklmnopqrstuvwxyz", "qwertyuiopasdfghjklzxcvbnm", "01234567890"];
 
 /** Estimativa simples da força: tamanho × variedade de caracteres, com descontos para padrões fáceis. */
-export function passwordStrength(pw: string): Strength {
+export function passwordStrength(pw: string, lang: UiLang = "pt"): Strength {
   if (!pw) return { score: 0, label: "", hint: "", bits: 0 };
   const lower = pw.toLowerCase();
   let pool = 0;
@@ -33,11 +34,10 @@ export function passwordStrength(pw: string): Strength {
   if (/^\d{1,2}[\/.-]?\d{1,2}[\/.-]?(\d{2}|\d{4})$/.test(pw)) bits = Math.min(bits, 18);
   if (COMMON.has(lower) || COMMON.has(lower.replace(/\d+$/, ""))) bits = Math.min(bits, 8);
   bits = Math.max(0, Math.round(bits));
-  if (bits < 28) return { score: 0, label: "Muito fraca", hint: "Programas de quebra de senha descobrem em segundos.", bits };
-  if (bits < 40) return { score: 1, label: "Fraca", hint: "Cai em pouco tempo num ataque de força bruta. Use 14 ou mais caracteres misturados.", bits };
-  if (bits < 60) return { score: 2, label: "Razoável", hint: "Aguenta tentativas casuais, mas não um ataque dedicado. Aumente o tamanho.", bits };
-  if (bits < 80) return { score: 3, label: "Forte", hint: "Difícil de quebrar com o AES-256 do PDF.", bits };
-  return { score: 4, label: "Muito forte", hint: "Impraticável de quebrar por força bruta.", bits };
+  const score: 0 | 1 | 2 | 3 | 4 = bits < 28 ? 0 : bits < 40 ? 1 : bits < 60 ? 2 : bits < 80 ? 3 : 4;
+  const label = translate(lang, `pw.s${score}.label` as `pw.s0.label`);
+  const hint = translate(lang, `pw.s${score}.hint` as `pw.s0.hint`);
+  return { score, label, hint, bits };
 }
 
 // sem letras e números que se confundem (l/1, O/0) e sem vírgula ou "=" (que o PDF não aceita aqui)

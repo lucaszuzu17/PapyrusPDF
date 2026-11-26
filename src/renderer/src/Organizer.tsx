@@ -42,15 +42,14 @@ export function Organizer() {
     const before = rest.filter((i) => i < target).length;
     const order = [...rest.slice(0, before), ...moving, ...rest.slice(before)];
     if (order.every((v, i) => v === i)) return;
-    await app.mutate("Reorganizando…", () => engine.reorderPages(order));
+    await app.mutate(app.t("org.reordering"), () => engine.reorderPages(order));
     setSel(moving.map((_, k) => before + k));
   };
 
   return (
     <div className="organizer" onClick={(e) => { if (e.target === e.currentTarget) setSel([]); }}>
       <p className="org-hint">
-        Clique para selecionar (Ctrl/Shift para várias), arraste para mudar a ordem, clique duplo para abrir.
-        As ações ficam na aba <b>Organizar</b>. {sel.length > 0 && <b>{sel.length} selecionada(s).</b>}
+        {app.t("org.hintBefore")}<b>{app.t("tab.organize")}</b>{app.t("org.hintAfter")} {sel.length > 0 && <b>{app.t("org.selected", { n: sel.length })}</b>}
       </p>
       <div className="org-grid">
         {doc.info.pages.map((p, i) => (
@@ -70,7 +69,7 @@ export function Organizer() {
         <div className={`org-end${dropAt === n ? " drop" : ""}`}
           onDragOver={(e) => { if (!isPageDrag(e)) return; e.preventDefault(); setDropAt(n); }}
           onDrop={(e) => { const from = draggedPage(e); if (from === null) return; e.preventDefault(); drop(n, from); }}>
-          soltar no fim
+          {app.t("org.dropEnd")}
         </div>
       </div>
     </div>

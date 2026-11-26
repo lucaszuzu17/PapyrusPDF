@@ -87,8 +87,8 @@ test("edita texto preservando o resto e com acentos", () => {
   writeFileSync(join(OUT, "editado.pdf"), saved);
   const e2 = new PdfEngine(); e2.open(saved);
   assert.match(allText(e2, 0), /Parágrafo editado/);
-  // depois de salvar o histórico recomeça e o documento continua íntegro
-  assert.equal(e.info().canUndo, false);
+  // depois de salvar o desfazer continua disponível (Tier 2) e o documento continua íntegro
+  assert.equal(e.info().canUndo, true);
   assert.match(allText(e, 0), /Parágrafo editado/);
 });
 

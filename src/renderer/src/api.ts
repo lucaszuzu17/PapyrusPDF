@@ -1,7 +1,9 @@
 // Acesso tipado ao motor (que roda numa thread do processo principal).
 import type {
-  AnnotInfo, BatchAction, BatchResult, CompareReport, CropMargins, DocInfo, EditTextRequest, EditTextResult,
-  FieldInfo, NewAnnot, OutlineNode, Rect, SearchHit, TextBlock,
+  AnnotInfo, AttachmentInfo, BatchAction, BatchResult, BatesSpec, CommentSummaryItem, CompareReport, CreateFieldSpec,
+  CropMargins, DigitalSignOptions, DocInfo, EditTextRequest, EditTextResult, FieldInfo, LayerInfo, LinkInfo, NewAnnot,
+  OptimizeOptions, OptimizeResult, OutlineNode, PageLabelRule, PfxCertInfo, Rect, SearchHit, SignatureVerifyInfo,
+  SmartRedactRequest, SmartRedactResult, SpaceAudit, TextBlock,
 } from "../../engine/types.ts";
 
 import type { HeaderFooterSpec, ImagePageOptions, ProtectOptions, WatermarkSpec } from "../../engine/core.ts";
@@ -52,7 +54,15 @@ function engineFor(doc: () => number) {
     split: (every: number) => call<Uint8Array[]>("split", every),
     editText: (req: EditTextRequest) => call<EditTextResult>("editText", req),
     scannedPages: () => call<number[]>("scannedPages"),
-    ocrPages: (pages: number[], langs = "por", dpi = 300) => call<{ words: number; info: DocInfo }>("ocrPages", pages, dpi, langs),
+    ocrPages: (pages: number[], langs = "por", dpi = 300, quality: "neural" | "best" | "fast" = "neural", cleanup = true) =>
+      call<{ words: number; deskewed: number; enhanced: number; oriented: number; info: DocInfo }>("ocrPages", pages, dpi, langs, quality, cleanup),
+    peekBytes: () => call<Uint8Array>("peekBytes"),
+    createField: (spec: CreateFieldSpec) => call<{ id: number; info: DocInfo }>("createField", spec),
+    deleteField: (page: number, id: number) => call<DocInfo>("deleteField", page, id),
+    autoDetectFields: (page: number) => call<{ created: number; info: DocInfo }>("autoDetectFields", page),
+    inspectPfx: (pfxBytes: Uint8Array, password: string) => call<PfxCertInfo>("inspectPfx", pfxBytes, password),
+    signDigital: (opts: DigitalSignOptions) => call<{ bytes: Uint8Array; cert: PfxCertInfo }>("signDigital", opts),
+    verifySignatures: (rawBytes?: Uint8Array) => call<SignatureVerifyInfo[]>("verifySignatures", rawBytes),
     setTitle: (title: string) => call<void>("setTitle", title),
     exportProtected: (opts: ProtectOptions) => call<Uint8Array>("exportProtected", opts),
     exportUnprotected: () => call<Uint8Array>("exportUnprotected"),
@@ -78,7 +88,26 @@ function engineFor(doc: () => number) {
     sanitizeMetadata: () => call<{ removed: number; info: DocInfo }>("sanitizeMetadata"),
     setOutline: (nodes: OutlineNode[]) => call<DocInfo>("setOutline", nodes),
     comparePdf: (otherBytes: Uint8Array, otherName: string) => call<CompareReport>("comparePdf", otherBytes, otherName),
-    batchProcess: (paths: string[], outDir: string, action: BatchAction) => call<BatchResult>("batchProcess", paths, outDir, action),
+    batchProcess: (paths: string[], outDir: string, action: BatchAction | BatchAction[]) => call<BatchResult>("batchProcess", paths, outDir, action),
+    auditSpace: () => call<SpaceAudit>("auditSpace"),
+    exportOptimized: (opts: OptimizeOptions) => call<OptimizeResult>("exportOptimized", opts),
+    redactByPatterns: (req: SmartRedactRequest) => call<SmartRedactResult>("redactByPatterns", req),
+    addBatesNumbering: (spec: BatesSpec) => call<{ nextNumber: number; info: DocInfo }>("addBatesNumbering", spec),
+    setPageLabelRules: (rules: PageLabelRule[]) => call<DocInfo>("setPageLabelRules", rules),
+    clearPageLabels: () => call<DocInfo>("clearPageLabels"),
+    commentsSummary: () => call<CommentSummaryItem[]>("commentsSummary"),
+    exportCommentsSummary: (format: "md" | "csv" | "pdf") => call<Uint8Array>("exportCommentsSummary", format),
+    saveCommentsSummary: (path: string, format: "md" | "csv" | "pdf") => call<number>("saveCommentsSummary", path, format),
+    attachments: () => call<AttachmentInfo[]>("attachments"),
+    getAttachmentData: (key: string) => call<Uint8Array>("getAttachmentData", key),
+    addAttachment: (filename: string, bytes: Uint8Array, mimetype?: string) => call<DocInfo>("addAttachment", filename, bytes, mimetype),
+    deleteAttachment: (key: string) => call<DocInfo>("deleteAttachment", key),
+    layers: () => call<LayerInfo[]>("layers"),
+    setLayerVisibility: (index: number, visible: boolean) => call<LayerInfo[]>("setLayerVisibility", index, visible),
+    links: (page: number) => call<LinkInfo[]>("links", page),
+    addLink: (page: number, rect: Rect, target: { page: number } | { uri: string }) => call<DocInfo>("addLink", page, rect, target),
+    deleteLink: (page: number, linkIndex: number) => call<DocInfo>("deleteLink", page, linkIndex),
+    autoOutline: () => call<{ count: number; info: DocInfo }>("autoOutline"),
   };
 }
 

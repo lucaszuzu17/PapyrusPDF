@@ -1,4 +1,5 @@
 // Imagens: preparo para virar página de PDF e geração dos carimbos.
+import { translate, type I18nKey, type UiLang } from "../../shared/i18n.ts";
 import type { Stamp } from "./state.tsx";
 
 /** Orientação EXIF de um JPEG (1 = normal; 0 se não houver). */
@@ -34,7 +35,7 @@ export function exifOrientation(b: Uint8Array): number {
 const isPng = (b: Uint8Array) => b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47;
 const isJpeg = (b: Uint8Array) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8;
 
-async function viaCanvas(bytes: Uint8Array, type: "image/png" | "image/jpeg"): Promise<Uint8Array> {
+async function viaCanvas(bytes: Uint8Array, type: "image/png" | "image/jpeg", lang: UiLang = "pt"): Promise<Uint8Array> {
   const bmp = await createImageBitmap(new Blob([bytes as BlobPart]), { imageOrientation: "from-image" });
   const c = document.createElement("canvas");
   c.width = bmp.width; c.height = bmp.height;
@@ -43,7 +44,7 @@ async function viaCanvas(bytes: Uint8Array, type: "image/png" | "image/jpeg"): P
   g.drawImage(bmp, 0, 0);
   bmp.close();
   const blob = await new Promise<Blob | null>((r) => c.toBlob(r, type, 0.92));
-  if (!blob) throw new Error("não foi possível converter a imagem.");
+  if (!blob) throw new Error(translate(lang, "img.convertErr"));
   return new Uint8Array(await blob.arrayBuffer());
 }
 
@@ -52,15 +53,15 @@ async function viaCanvas(bytes: Uint8Array, type: "image/png" | "image/jpeg"): P
  * orientação certa: fotos de celular com rotação EXIF são redesenhadas em pé,
  * e BMP/GIF/WebP viram PNG. PNG e JPEG comuns passam sem recompressão.
  */
-export async function prepareImages(files: { name: string; bytes: Uint8Array }[]): Promise<Uint8Array[]> {
+export async function prepareImages(files: { name: string; bytes: Uint8Array }[], lang: UiLang = "pt"): Promise<Uint8Array[]> {
   const out: Uint8Array[] = [];
   for (const f of files) {
     try {
       if (isPng(f.bytes)) out.push(f.bytes);
-      else if (isJpeg(f.bytes)) out.push(exifOrientation(f.bytes) > 1 ? await viaCanvas(f.bytes, "image/jpeg") : f.bytes);
-      else out.push(await viaCanvas(f.bytes, "image/png"));
+      else if (isJpeg(f.bytes)) out.push(exifOrientation(f.bytes) > 1 ? await viaCanvas(f.bytes, "image/jpeg", lang) : f.bytes);
+      else out.push(await viaCanvas(f.bytes, "image/png", lang));
     } catch {
-      throw new Error(`“${f.name}” não é uma imagem que o PapyrusPDF consiga ler.`);
+      throw new Error(translate(lang, "img.unreadable", { name: f.name }));
     }
   }
   return out;
@@ -68,18 +69,22 @@ export async function prepareImages(files: { name: string; bytes: Uint8Array }[]
 
 // ---------- carimbos ----------
 
-export const STAMP_PRESETS: { id: string; text: string; color: string }[] = [
-  { id: "aprovado", text: "APROVADO", color: "#1a7f37" },
-  { id: "reprovado", text: "REPROVADO", color: "#c62828" },
-  { id: "revisado", text: "REVISADO", color: "#1f5fbf" },
-  { id: "confidencial", text: "CONFIDENCIAL", color: "#c62828" },
-  { id: "rascunho", text: "RASCUNHO", color: "#5f6b7a" },
-  { id: "urgente", text: "URGENTE", color: "#d35400" },
-  { id: "pago", text: "PAGO", color: "#1a7f37" },
-  { id: "recebido", text: "RECEBIDO", color: "#1f5fbf" },
-  { id: "copia", text: "CÓPIA", color: "#5f6b7a" },
-  { id: "cancelado", text: "CANCELADO", color: "#c62828" },
+const STAMP_DEF: { id: string; key: I18nKey; color: string }[] = [
+  { id: "aprovado", key: "stamp.aprovado", color: "#1a7f37" },
+  { id: "reprovado", key: "stamp.reprovado", color: "#c62828" },
+  { id: "revisado", key: "stamp.revisado", color: "#1f5fbf" },
+  { id: "confidencial", key: "stamp.confidencial", color: "#c62828" },
+  { id: "rascunho", key: "stamp.rascunho", color: "#5f6b7a" },
+  { id: "urgente", key: "stamp.urgente", color: "#d35400" },
+  { id: "pago", key: "stamp.pago", color: "#1a7f37" },
+  { id: "recebido", key: "stamp.recebido", color: "#1f5fbf" },
+  { id: "copia", key: "stamp.copia", color: "#5f6b7a" },
+  { id: "cancelado", key: "stamp.cancelado", color: "#c62828" },
 ];
+
+export function stampPresets(lang: UiLang = "pt"): { id: string; text: string; color: string }[] {
+  return STAMP_DEF.map((d) => ({ id: d.id, text: translate(lang, d.key), color: d.color }));
+}
 
 /** Desenha um carimbo (moldura arredondada, texto em negrito e, se houver, uma segunda linha). */
 export function makeStamp(text: string, color: string, sub = ""): Stamp {

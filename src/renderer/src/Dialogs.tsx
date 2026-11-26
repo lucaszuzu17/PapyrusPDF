@@ -18,6 +18,7 @@ export function Dialogs() {
 }
 
 function CompareModal({ report, onClose }: { report: CompareReport; onClose: () => void }) {
+  const { t } = useApp();
   const firstDiff = report.pages.findIndex((p) => p.status !== "same");
   const [idx, setIdx] = useState(firstDiff >= 0 ? firstDiff : 0);
   const cur = report.pages[idx] ?? report.pages[0];
@@ -35,24 +36,27 @@ function CompareModal({ report, onClose }: { report: CompareReport; onClose: () 
   }, [onClose]);
 
   const STATUS: Record<string, string> = {
-    same: "Idêntica", changed: "Alterada", onlyA: "Só no original", onlyB: "Só no novo",
+    same: t("dlg.statusSame"),
+    changed: t("dlg.statusChanged"),
+    onlyA: t("dlg.statusOnlyA"),
+    onlyB: t("dlg.statusOnlyB"),
   };
 
   return (
     <div className="modal-bg" onPointerDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal compare-modal" role="dialog" aria-modal="true" aria-label="Comparação de PDFs">
-        <h2>Comparação: {report.nameA} ↔ {report.nameB}</h2>
+      <div className="modal compare-modal" role="dialog" aria-modal="true" aria-label={t("dlg.compareAria")}>
+        <h2>{t("dlg.compareTitle", { a: report.nameA, b: report.nameB })}</h2>
         <div className="cmp-summary">
-          <span className="cmp-chip same">Idênticas: {report.same}</span>
-          <span className="cmp-chip changed">Alteradas: {report.changed}</span>
-          {report.onlyA > 0 && <span className="cmp-chip onlyA">Só no 1º: {report.onlyA}</span>}
-          {report.onlyB > 0 && <span className="cmp-chip onlyB">Só no 2º: {report.onlyB}</span>}
+          <span className="cmp-chip same">{t("dlg.chipSame", { n: report.same })}</span>
+          <span className="cmp-chip changed">{t("dlg.chipChanged", { n: report.changed })}</span>
+          {report.onlyA > 0 && <span className="cmp-chip onlyA">{t("dlg.chipOnlyA", { n: report.onlyA })}</span>}
+          {report.onlyB > 0 && <span className="cmp-chip onlyB">{t("dlg.chipOnlyB", { n: report.onlyB })}</span>}
         </div>
         <div className="cmp-body">
           <div className="cmp-pages">
             {report.pages.map((p, i) => (
               <button key={p.page} className={`cmp-pg ${p.status}${i === idx ? " on" : ""}`} onClick={() => setIdx(i)}>
-                <b>Pág. {p.page + 1}</b>
+                <b>{t("common.pageAbbr")} {p.page + 1}</b>
                 <small>{STATUS[p.status]}{p.status === "changed" ? ` (${p.visualDiffPct}%)` : ""}</small>
               </button>
             ))}
@@ -60,30 +64,30 @@ function CompareModal({ report, onClose }: { report: CompareReport; onClose: () 
           {cur && (
             <div className="cmp-detail">
               {cur.status === "same" ? (
-                <p className="empty">Nenhuma diferença visual ou de texto nesta página.</p>
+                <p className="empty">{t("dlg.compareNoDiff")}</p>
               ) : (
                 <>
                   {imgUrl && (
                     <div className="cmp-vis">
-                      <small>Mapa visual (vermelho = removido/alterado · azul = adicionado)</small>
-                      <img src={imgUrl} alt={`Diferenças na página ${cur.page + 1}`} />
+                      <small>{t("dlg.compareVisMap")}</small>
+                      <img src={imgUrl} alt={t("dlg.compareImgAlt", { n: cur.page + 1 })} />
                     </div>
                   )}
                   <div className="cmp-text">
                     {cur.removed.length > 0 && (
                       <div className="cmp-list rem">
-                        <b>Removido / Original ({cur.removed.length})</b>
+                        <b>{t("dlg.compareRemoved", { n: cur.removed.length })}</b>
                         <ul>{cur.removed.map((l, k) => <li key={k}>− {l}</li>)}</ul>
                       </div>
                     )}
                     {cur.added.length > 0 && (
                       <div className="cmp-list add">
-                        <b>Adicionado / Novo ({cur.added.length})</b>
+                        <b>{t("dlg.compareAdded", { n: cur.added.length })}</b>
                         <ul>{cur.added.map((l, k) => <li key={k}>+ {l}</li>)}</ul>
                       </div>
                     )}
                     {!cur.removed.length && !cur.added.length && (
-                      <p className="empty">O texto extraído é igual; a diferença é apenas visual (imagem, desenho ou posição).</p>
+                      <p className="empty">{t("dlg.compareVisualOnly")}</p>
                     )}
                   </div>
                 </>
@@ -92,7 +96,7 @@ function CompareModal({ report, onClose }: { report: CompareReport; onClose: () 
           )}
         </div>
         <div className="modal-actions">
-          <button type="button" className="primary" onClick={onClose}>Fechar</button>
+          <button type="button" className="primary" onClick={onClose}>{t("common.close")}</button>
         </div>
       </div>
     </div>
@@ -100,7 +104,7 @@ function CompareModal({ report, onClose }: { report: CompareReport; onClose: () 
 }
 
 function Basic() {
-  const { dialog, closeDialog } = useApp();
+  const { dialog, closeDialog, t } = useApp();
   const d = dialog!;
   const [v, setV] = useState(d.value ?? "");
   const ok = () => closeDialog(d.kind === "confirm" ? "ok" : v);
@@ -113,8 +117,8 @@ function Basic() {
         : <input autoFocus value={v} onChange={(e) => setV(e.target.value)} />)}
       {d.kind === "password" && <input autoFocus type="password" value={v} onChange={(e) => setV(e.target.value)} />}
       <div className="modal-actions">
-        <button type="button" onClick={() => closeDialog(null)}>Cancelar</button>
-        <button type="submit" className="primary" autoFocus={d.kind === "confirm"}>{d.okLabel ?? (d.kind === "confirm" ? "Confirmar" : "OK")}</button>
+        <button type="button" onClick={() => closeDialog(null)}>{t("common.cancel")}</button>
+        <button type="submit" className="primary" autoFocus={d.kind === "confirm"}>{d.okLabel ?? (d.kind === "confirm" ? t("common.confirm") : t("common.ok"))}</button>
       </div>
     </form>
   );
@@ -122,7 +126,7 @@ function Basic() {
 
 /** Formulário genérico: campos numa grade de 6 colunas, com validação antes de confirmar. */
 function Form() {
-  const { dialog, closeDialog } = useApp();
+  const { dialog, closeDialog, t } = useApp();
   const d = dialog!;
   const fields = d.fields ?? [];
   const [v, setV] = useState<FormValues>(() => Object.fromEntries(fields.map((f) => [f.id, f.value])));
@@ -182,8 +186,8 @@ function Form() {
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="modal-actions">
-        <button type="button" onClick={() => closeDialog(null)}>Cancelar</button>
-        <button type="submit" className="primary">{d.okLabel ?? "OK"}</button>
+        <button type="button" onClick={() => closeDialog(null)}>{t("common.cancel")}</button>
+        <button type="submit" className="primary">{d.okLabel ?? t("common.ok")}</button>
       </div>
     </form>
   );
@@ -191,6 +195,7 @@ function Form() {
 
 /** Desenhe a assinatura (ou importe uma imagem). Devolve PNG transparente recortado. */
 function SignaturePad({ onDone }: { onDone: (v: string | null) => void }) {
+  const { t } = useApp();
   const ref = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
   const [empty, setEmpty] = useState(true);
@@ -209,7 +214,7 @@ function SignaturePad({ onDone }: { onDone: (v: string | null) => void }) {
   const clear = () => { const c = ref.current!; c.getContext("2d")!.clearRect(0, 0, c.width, c.height); setEmpty(true); };
 
   const importImage = async () => {
-    const [f] = await window.papiro.openDialog({ title: "Imagem da assinatura", images: true });
+    const [f] = await window.papiro.openDialog({ title: t("dlg.sigOpenTitle"), images: true });
     if (!f) return;
     const url = URL.createObjectURL(new Blob([f.bytes as BlobPart]));
     const img = new Image(); img.src = url; await img.decode();
@@ -238,17 +243,17 @@ function SignaturePad({ onDone }: { onDone: (v: string | null) => void }) {
 
   return (
     <div>
-      <p>Desenhe sua assinatura no quadro abaixo. Ela fica salva neste computador para os próximos documentos.</p>
+      <p>{t("dlg.sigInstructions")}</p>
       <canvas ref={ref} className="sigpad" style={{ width: W, height: H }}
         onPointerDown={(e) => { drawing.current = true; ref.current!.setPointerCapture(e.pointerId); const [x, y] = pos(e); const g = ref.current!.getContext("2d")!; g.beginPath(); g.moveTo(x, y); }}
         onPointerMove={(e) => { if (!drawing.current) return; const [x, y] = pos(e); const g = ref.current!.getContext("2d")!; g.lineTo(x, y); g.stroke(); setEmpty(false); }}
         onPointerUp={() => { drawing.current = false; }} />
       <div className="modal-actions">
-        <button onClick={clear}>Limpar</button>
-        <button onClick={importImage}>Importar imagem…</button>
+        <button onClick={clear}>{t("dlg.sigClear")}</button>
+        <button onClick={importImage}>{t("dlg.sigImport")}</button>
         <span className="grow" />
-        <button onClick={() => onDone(null)}>Cancelar</button>
-        <button className="primary" disabled={empty} onClick={finish}>Usar assinatura</button>
+        <button onClick={() => onDone(null)}>{t("common.cancel")}</button>
+        <button className="primary" disabled={empty} onClick={finish}>{t("dlg.sigUse")}</button>
       </div>
     </div>
   );

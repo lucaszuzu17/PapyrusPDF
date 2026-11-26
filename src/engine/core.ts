@@ -5,20 +5,36 @@ import { compareDocuments } from "./compare.ts";
 import { buildDocx, type DocxImage, type DocxPage, type DocxPara, type DocxRun } from "./docx.ts";
 import { fontStyle, genericFontCategory, isSymbolicFont, stripSubset } from "./fontname.ts";
 import { normalizePdfText, originalSource, type GlyphSource } from "./fonts.ts";
+import { addFormField, detectCandidateFields, removeFormField } from "./forms.ts";
+import { preprocessPixelsForOcr, rotatePixels90, unrotateOcrBox, type QuarterTurn } from "./ocr-prep.ts";
+import { inspectPfx, signPdfBytes, verifyPdfSignatures } from "./sign.ts";
 import { buildCsv } from "./tables.ts";
+import {
+  buildCommentsSummaryPdf, detectHeadingOutline, extractTextInRect, findPatternMatches,
+  formatCommentsCsv, formatCommentsMarkdown,
+} from "./tier1.ts";
 import {
   pageType3Fonts, recoverType3Font, repairType3FontBBoxes, type3FontObjNum,
   type Type3FontInfo, type Type3Recovered,
 } from "./type3.ts";
 import { removePageWatermarks } from "./watermarks.ts";
 import type {
-  AnnotInfo, CompareReport, CropMargins, DocInfo, EditTextRequest, EditTextResult, FieldInfo, NewAnnot, OutlineNode,
-  Point, Quad, Rect, RGB, SearchHit, TextBlock, TextLine,
+  AnnotInfo, AttachmentInfo, BatesSpec, CommentSummaryItem, CompareReport, CreateFieldSpec, CropMargins,
+  DigitalSignOptions, DocInfo, EditTextRequest, EditTextResult, FieldInfo, LayerInfo, LinkInfo, NewAnnot,
+  OptimizeOptions, OptimizeResult, OutlineNode, PageLabelRule, PfxCertInfo, Point, Quad, Rect, RGB,
+  SearchHit, SignatureVerifyInfo, SmartRedactRequest, SmartRedactResult, SpaceAudit, TextBlock, TextLine,
 } from "./types.ts";
 
 export interface OcrSymbol { text: string; bbox: Rect; confidence: number }
 export interface OcrWord { text: string; bbox: Rect; confidence?: number; symbols?: OcrSymbol[] } // bbox em pixels da imagem enviada
-export type Recognizer = (png: Uint8Array) => Promise<OcrWord[]>;
+export type Recognizer = ((png: Uint8Array) => Promise<OcrWord[]>) & {
+  recognizeRgb?: (rgb: Uint8Array | Uint8ClampedArray, width: number, height: number, comps?: number) => Promise<OcrWord[]>;
+  detectOrientation?: (rgb: Uint8Array | Uint8ClampedArray, width: number, height: number, comps?: number) => Promise<{
+    angle: QuarterTurn;
+    fixCwDeg: QuarterTurn;
+    confidence: number;
+  }>;
+};
 /** Procura no sistema uma fonte equivalente à do PDF (usada quando a fonte embutida não tem alguma letra). */
 export type FontProvider = (pdfFontName: string) => { data: Uint8Array; subfont?: number; file?: string } | null;
 
@@ -39,6 +55,10 @@ export class PdfEngine {
   private type3Info = new Map<number, Type3FontInfo>();
   private type3Cache = new Map<string, Type3Recovered>();
   private readonly fontProvider: FontProvider | null;
+  // Histórico de snapshots através de "Salvar" (Ctrl+Z sobrevive ao salvamento, limitado a ~40 MB)
+  private baselineBytes: Uint8Array | null = null;
+  private saveUndoStack: Uint8Array[] = [];
+  private saveRedoStack: Uint8Array[] = [];
 
   constructor(opts: { fonts?: FontProvider } = {}) {
     this.fontProvider = opts.fonts ?? null;
@@ -66,7 +86,27 @@ export class PdfEngine {
     }
     if (needsPw && !doc.authenticatePassword(password)) { doc.destroy(); throw new Error("Senha incorreta."); }
     this.adopt(doc, title, needsPw ? password : "");
+    this.baselineBytes = bytes.length <= 15_000_000 ? new Uint8Array(bytes) : null;
+    this.saveUndoStack = [];
+    this.saveRedoStack = [];
     return this.info();
+  }
+
+  /** Reabre internamente mantendo a pilha de desfazer entre salvamentos. */
+  private openKeepingSaveHistory(bytes: Uint8Array, title: string, password: string): void {
+    const u = this.saveUndoStack;
+    const r = this.saveRedoStack;
+    const b = this.baselineBytes;
+    const pending = this.pending;
+    this.pending = null;
+    try {
+      this.open(bytes, title, password);
+    } finally {
+      this.pending = pending;
+      this.saveUndoStack = u;
+      this.saveRedoStack = r;
+      this.baselineBytes = b;
+    }
   }
 
   /** Há um documento esperando a senha de abertura? */
@@ -108,6 +148,9 @@ export class PdfEngine {
     this.doc = null;
     this.type3Info.clear();
     this.type3Cache.clear();
+    this.baselineBytes = null;
+    this.saveUndoStack = [];
+    this.saveRedoStack = [];
   }
 
   info(): DocInfo {
@@ -125,8 +168,8 @@ export class PdfEngine {
       pages,
       outline: this.outline(),
       title: doc.getMetaData("info:Title") || this.title,
-      canUndo: doc.canUndo(),
-      canRedo: doc.canRedo(),
+      canUndo: doc.canUndo() || this.saveUndoStack.length > 0,
+      canRedo: doc.canRedo() || this.saveRedoStack.length > 0,
       dirty: this.modified,
       encrypted: this.encrypted,
     };
@@ -147,26 +190,41 @@ export class PdfEngine {
   }
 
   /**
-   * Salva e reabre a partir dos bytes salvos. Salvar invalida o histórico do
-   * MuPDF (desfazer passaria a restaurar objetos errados), então o histórico
-   * recomeça a cada salvamento — desfazer vale até o último "Salvar".
+   * Salva e guarda um snapshot anterior na pilha de desfazer, permitindo `Ctrl+Z` mesmo após salvar.
    */
   save(): Uint8Array {
+    if (this.modified && this.baselineBytes && this.baselineBytes.length <= 15_000_000) {
+      this.pushSaveSnapshot(this.saveUndoStack, this.baselineBytes);
+      this.saveRedoStack = [];
+    }
     const out = this.serialize();
+    this.baselineBytes = out.length <= 15_000_000 ? out : null;
     this.modified = false;
     return out;
   }
 
-  /** Bytes do documento atual. Reabre a partir deles (o histórico recomeça), preservando senha e estado. */
-  private serialize(options = SAVE_OPTIONS): Uint8Array {
+  /** Serializa uma cópia instantânea dos bytes atuais SEM alterar o estado ou histórico (para auto-recuperação e verificação). */
+  peekBytes(options = SAVE_OPTIONS): Uint8Array {
     const buf = this.d().saveToBuffer(options);
-    const out = new Uint8Array(buf.asUint8Array()); // copia para fora da memória WASM
+    const out = new Uint8Array(buf.asUint8Array());
     buf.destroy();
+    return out;
+  }
+
+  private pushSaveSnapshot(stack: Uint8Array[], bytes: Uint8Array): void {
+    stack.push(bytes);
+    const maxBytes = 40_000_000;
+    let total = stack.reduce((s, b) => s + b.length, 0);
+    while (stack.length > 6 || (stack.length > 1 && total > maxBytes)) {
+      total -= stack.shift()!.length;
+    }
+  }
+
+  /** Bytes do documento atual. Reabre a partir deles, preservando senha, estado e snapshots entre salvamentos. */
+  private serialize(options = SAVE_OPTIONS): Uint8Array {
+    const out = this.peekBytes(options);
     const { title, password, modified } = this;
-    // um documento que espera senha (abertura em andamento) sobrevive ao salvamento do atual
-    const pending = this.pending;
-    this.pending = null;
-    try { this.open(out, title, password); } finally { this.pending = pending; }
+    this.openKeepingSaveHistory(out, title, password);
     this.modified = modified;
     return out;
   }
@@ -308,65 +366,221 @@ export class PdfEngine {
    * Não altera o documento aberto.
    */
   exportCompressed(level: "leve" | "media" | "forte"): { bytes: Uint8Array; before: number; after: number; images: number } {
-    const cfg = { leve: { px: 2600, q: 85 }, media: { px: 1800, q: 72 }, forte: { px: 1200, q: 55 } }[level];
-    const original = this.serialize();
-    const d = this.scratch(original);
-    let images = 0;
-    const n = d.countObjects();
-    for (let num = 1; num < n; num++) {
-      let obj: mupdf.PDFObject;
-      try { obj = d.newIndirect(num); if (!obj.isStream()) continue; } catch { continue; }
-      const sub = obj.get("Subtype");
-      if (sub.isNull() || sub.asName() !== "Image") continue;
-      if (obj.get("ImageMask").isBoolean() && obj.get("ImageMask").asBoolean()) continue;
-      if (obj.get("Mask").isArray()) continue; // máscara por cor-chave não sobrevive ao JPEG
-      // Cada imagem decodificada ocupa dezenas de MB na memória do MuPDF: libera tudo a cada volta
-      // (o coletor de lixo não roda no meio deste laço).
-      let img: mupdf.Image | undefined, p0: mupdf.Pixmap | undefined, p1: mupdf.Pixmap | undefined, p2: mupdf.Pixmap | undefined;
-      try {
-        const w = obj.get("Width").asNumber(), h = obj.get("Height").asNumber();
-        const raw = obj.readRawStream();
-        const rawLen = raw.getLength();
-        raw.destroy();
-        if (rawLen < 60_000) continue; // pequena demais para valer a pena
-        img = d.loadImage(obj);
-        p0 = img.toPixmap();
-        // só é cinza o que está num espaço de cor cinza (tinta especial de 1 canal vira RGB, não cinza)
-        const gray = p0.getColorSpace()?.isGray() === true;
-        p1 = p0.convertToColorSpace(gray ? mupdf.ColorSpace.DeviceGray : mupdf.ColorSpace.DeviceRGB, false);
-        p0.destroy(); p0 = undefined;
-        const big = Math.max(w, h);
-        let nw = w, nh = h;
-        if (big > cfg.px) {
-          const s = cfg.px / big;
-          nw = Math.max(1, Math.round(w * s)); nh = Math.max(1, Math.round(h * s));
-          p2 = p1.warp([[0, 0], [w, 0], [w, h], [0, h]], nw, nh);
-        }
-        const jpg = (p2 ?? p1).asJPEG(cfg.q);
-        if (jpg.length >= rawLen * 0.9) continue;
-        obj.writeRawStream(jpg);
-        obj.put("Filter", d.newName("DCTDecode"));
-        obj.delete("DecodeParms");
-        obj.delete("Decode");
-        obj.put("Width", nw);
-        obj.put("Height", nh);
-        obj.put("ColorSpace", d.newName(gray ? "DeviceGray" : "DeviceRGB"));
-        obj.put("BitsPerComponent", 8);
-        images++;
-      } catch { /* imagem em formato não suportado: fica como está */ }
-      finally { p2?.destroy(); p1?.destroy(); p0?.destroy(); img?.destroy(); }
-    }
-    let buf: mupdf.Buffer;
-    try { buf = d.saveToBuffer("garbage=compact,compress,compress-fonts,compress-images,objstms"); }
-    catch { buf = d.saveToBuffer(SAVE_OPTIONS); }
-    let bytes: Uint8Array = new Uint8Array(buf.asUint8Array());
-    buf.destroy(); d.destroy();
-    if (bytes.length >= original.length) bytes = original; // nunca piora
-    return { bytes, before: original.length, after: bytes.length, images };
+    const r = this.exportOptimized({ level });
+    return { bytes: r.bytes, before: r.before, after: r.after, images: r.images };
   }
 
-  undo(): DocInfo { if (this.d().canUndo()) { this.d().undo(); this.modified = true; this.forgetRefs(); } return this.info(); }
-  redo(): DocInfo { if (this.d().canRedo()) { this.d().redo(); this.modified = true; this.forgetRefs(); } return this.info(); }
+  /** Auditoria offline de espaço: mostra quanto cada categoria (imagens, fontes, fluxos, anexos…) ocupa no PDF. */
+  auditSpace(): SpaceAudit {
+    const doc = this.d();
+    const buf = doc.saveToBuffer(SAVE_OPTIONS);
+    const totalBytes = buf.getLength();
+    buf.destroy();
+
+    let images = 0, fonts = 0, streams = 0, metadata = 0, attachments = 0;
+    let imageCount = 0, fontCount = 0, attachmentCount = 0;
+    const fontStreamNums = new Set<number>();
+
+    const n = doc.countObjects();
+    for (let num = 1; num < n; num++) {
+      let obj: mupdf.PDFObject;
+      try { obj = doc.newIndirect(num); } catch { continue; }
+      if (obj.isDictionary()) {
+        const typ = obj.get("Type").isName() ? obj.get("Type").asName() : "";
+        if (typ === "FontDescriptor") {
+          for (const fk of ["FontFile", "FontFile2", "FontFile3"]) {
+            const ref = obj.get(fk);
+            if (ref.isIndirect()) fontStreamNums.add(ref.asIndirect());
+          }
+        }
+      }
+    }
+
+    const pageContentNums = new Set<number>();
+    const pc = doc.countPages();
+    for (let i = 0; i < pc; i++) {
+      const c = doc.findPage(i).get("Contents");
+      if (c.isIndirect()) pageContentNums.add(c.asIndirect());
+      else if (c.isArray()) c.forEach((v) => { if (v.isIndirect()) pageContentNums.add(v.asIndirect()); });
+    }
+
+    for (let num = 1; num < n; num++) {
+      let obj: mupdf.PDFObject;
+      try { obj = doc.newIndirect(num); if (!obj.isStream()) continue; } catch { continue; }
+      let len = 0;
+      try {
+        const raw = obj.readRawStream();
+        len = raw.getLength();
+        raw.destroy();
+      } catch { continue; }
+      const typ = obj.get("Type").isName() ? obj.get("Type").asName() : "";
+      const sub = obj.get("Subtype").isName() ? obj.get("Subtype").asName() : "";
+      if (sub === "Image") { images += len; imageCount++; }
+      else if (fontStreamNums.has(num) || typ === "Font" || sub === "Type1C" || sub === "CIDFontType0C" || sub === "OpenType") { fonts += len; fontCount++; }
+      else if (typ === "EmbeddedFile") { attachments += len; attachmentCount++; }
+      else if (typ === "Metadata") { metadata += len; }
+      else if (pageContentNums.has(num) || sub === "Form") { streams += len; }
+      else { streams += len; }
+    }
+
+    const accounted = images + fonts + streams + metadata + attachments;
+    return {
+      totalBytes,
+      images,
+      fonts,
+      streams,
+      metadata,
+      attachments,
+      other: Math.max(0, totalBytes - accounted),
+      imageCount,
+      fontCount,
+      attachmentCount,
+    };
+  }
+
+  /**
+   * Otimizador avançado offline: redução de imagens, subconjunto de fontes, linearização (Fast Web View)
+   * e remoção seletiva de metadados, anexos, marcadores, miniaturas e JavaScript. Não altera o documento aberto.
+   */
+  exportOptimized(opts: OptimizeOptions): OptimizeResult {
+    const buf0 = this.d().saveToBuffer(SAVE_OPTIONS);
+    const original = new Uint8Array(buf0.asUint8Array());
+    buf0.destroy();
+    const d = this.scratch(original);
+    let images = 0;
+
+    try {
+      if (opts.level !== "nenhuma") {
+        const cfg = { leve: { px: 2600, q: 85 }, media: { px: 1800, q: 72 }, forte: { px: 1200, q: 55 } }[opts.level];
+        const n = d.countObjects();
+        for (let num = 1; num < n; num++) {
+          let obj: mupdf.PDFObject;
+          try { obj = d.newIndirect(num); if (!obj.isStream()) continue; } catch { continue; }
+          const sub = obj.get("Subtype");
+          if (sub.isNull() || sub.asName() !== "Image") continue;
+          if (obj.get("ImageMask").isBoolean() && obj.get("ImageMask").asBoolean()) continue;
+          if (obj.get("Mask").isArray()) continue;
+          let img: mupdf.Image | undefined, p0: mupdf.Pixmap | undefined, p1: mupdf.Pixmap | undefined, p2: mupdf.Pixmap | undefined;
+          try {
+            const w = obj.get("Width").asNumber(), h = obj.get("Height").asNumber();
+            const raw = obj.readRawStream();
+            const rawLen = raw.getLength();
+            raw.destroy();
+            if (rawLen < 60_000) continue;
+            img = d.loadImage(obj);
+            p0 = img.toPixmap();
+            const gray = p0.getColorSpace()?.isGray() === true;
+            p1 = p0.convertToColorSpace(gray ? mupdf.ColorSpace.DeviceGray : mupdf.ColorSpace.DeviceRGB, false);
+            p0.destroy(); p0 = undefined;
+            const big = Math.max(w, h);
+            let nw = w, nh = h;
+            if (big > cfg.px) {
+              const s = cfg.px / big;
+              nw = Math.max(1, Math.round(w * s)); nh = Math.max(1, Math.round(h * s));
+              p2 = p1.warp([[0, 0], [w, 0], [w, h], [0, h]], nw, nh);
+            }
+            const jpg = (p2 ?? p1).asJPEG(cfg.q);
+            if (jpg.length >= rawLen * 0.9) continue;
+            obj.writeRawStream(jpg);
+            obj.put("Filter", d.newName("DCTDecode"));
+            obj.delete("DecodeParms");
+            obj.delete("Decode");
+            obj.put("Width", nw);
+            obj.put("Height", nh);
+            obj.put("ColorSpace", d.newName(gray ? "DeviceGray" : "DeviceRGB"));
+            obj.put("BitsPerComponent", 8);
+            images++;
+          } catch { /* imagem em formato não suportado: fica como está */ }
+          finally { p2?.destroy(); p1?.destroy(); p0?.destroy(); img?.destroy(); }
+        }
+      }
+
+      if (opts.subsetFonts) {
+        try { d.subsetFonts(); } catch { /* segue sem subconjunto se alguma fonte falhar */ }
+      }
+
+      const trailer = d.getTrailer();
+      const root = trailer.get("Root").resolve();
+      const pc = d.countPages();
+
+      if (opts.stripMetadata) {
+        trailer.delete("Info");
+        if (root.isDictionary()) root.delete("Metadata");
+        for (let i = 0; i < pc; i++) d.findPage(i).delete("Metadata");
+      }
+      if (opts.stripAttachments) {
+        try {
+          for (const key of Object.keys(d.getEmbeddedFiles())) d.deleteEmbeddedFile(key);
+        } catch { /* sem anexos */ }
+        if (root.isDictionary()) root.delete("AF");
+        for (let i = 0; i < pc; i++) d.findPage(i).delete("AF");
+      }
+      if (opts.stripBookmarks && root.isDictionary()) {
+        root.delete("Outlines");
+      }
+      if (opts.stripThumbnails) {
+        for (let i = 0; i < pc; i++) d.findPage(i).delete("Thumb");
+      }
+      if (opts.stripJavaScript) {
+        if (root.isDictionary()) {
+          const names = root.get("Names");
+          if (names.isDictionary()) names.delete("JavaScript");
+          root.delete("OpenAction");
+          root.delete("AA");
+        }
+        for (let i = 0; i < pc; i++) d.findPage(i).delete("AA");
+      }
+
+      const garbage = opts.deduplicate ? "garbage=deduplicate" : "garbage=compact";
+      const saveOpts = `${garbage},compress,compress-fonts,compress-images,objstms`;
+      let buf: mupdf.Buffer;
+      try { buf = d.saveToBuffer(saveOpts); }
+      catch { buf = d.saveToBuffer(SAVE_OPTIONS); }
+      let bytes: Uint8Array = new Uint8Array(buf.asUint8Array());
+      buf.destroy();
+      const structural = !!(opts.stripMetadata || opts.stripAttachments || opts.stripBookmarks || opts.stripThumbnails || opts.stripJavaScript);
+      if (!structural && bytes.length >= original.length) bytes = original;
+      return { bytes, before: original.length, after: bytes.length, images };
+    } finally {
+      d.destroy();
+    }
+  }
+
+  undo(): DocInfo {
+    if (this.d().canUndo()) {
+      this.d().undo();
+      this.modified = true;
+      this.forgetRefs();
+      return this.info();
+    }
+    if (this.saveUndoStack.length > 0) {
+      const cur = this.peekBytes();
+      if (cur.length <= 15_000_000) this.pushSaveSnapshot(this.saveRedoStack, cur);
+      const prev = this.saveUndoStack.pop()!;
+      this.openKeepingSaveHistory(prev, this.title, this.password);
+      this.baselineBytes = prev;
+      this.modified = true;
+    }
+    return this.info();
+  }
+
+  redo(): DocInfo {
+    if (this.d().canRedo()) {
+      this.d().redo();
+      this.modified = true;
+      this.forgetRefs();
+      return this.info();
+    }
+    if (this.saveRedoStack.length > 0) {
+      const cur = this.peekBytes();
+      if (cur.length <= 15_000_000) this.pushSaveSnapshot(this.saveUndoStack, cur);
+      const next = this.saveRedoStack.pop()!;
+      this.openKeepingSaveHistory(next, this.title, this.password);
+      this.baselineBytes = next;
+      this.modified = true;
+    }
+    return this.info();
+  }
 
   /** Desfazer pode ter apagado os objetos de fonte/transparência criados antes: não reaproveita nenhum. */
   private forgetRefs(): void {
@@ -601,20 +815,85 @@ export class PdfEngine {
     return out;
   }
 
-  /** Aplica todas as marcas de redação do documento. Retorna quantas páginas mudaram. */
+  /** Aplica todas as marcas de redação do documento (incluindo códigos de sobreposição LGPD). */
   applyAllRedactions(): { pages: number; info: DocInfo } {
     const pages = [...new Set(this.allAnnotations().filter((a) => a.kind === "Redact").map((a) => a.page))];
     if (pages.length) {
       this.op("Aplicar redações", () => {
-        for (const i of pages) {
-          const page = this.d().loadPage(i);
-          page.applyRedactions(true, mupdf.PDFPage.REDACT_IMAGE_PIXELS,
-            mupdf.PDFPage.REDACT_LINE_ART_REMOVE_IF_COVERED, mupdf.PDFPage.REDACT_TEXT_REMOVE);
+        for (const i of pages) this.applyPageRedactionsInner(i);
+      });
+    }
+    return { pages: pages.length, info: this.info() };
+  }
+
+  private applyPageRedactionsInner(index: number): void {
+    const page = this.d().loadPage(index);
+    const overlays: { rect: Rect; text: string }[] = [];
+    for (const a of page.getAnnotations()) {
+      if (a.getType() !== "Redact") continue;
+      const txt = (a.getContents() ?? "").trim();
+      if (txt) overlays.push({ rect: (a.hasRect() ? a.getRect() : a.getBounds()) as Rect, text: txt });
+    }
+    page.applyRedactions(true, mupdf.PDFPage.REDACT_IMAGE_PIXELS,
+      mupdf.PDFPage.REDACT_LINE_ART_REMOVE_IF_COVERED, mupdf.PDFPage.REDACT_TEXT_REMOVE);
+    page.destroy();
+
+    if (overlays.length) {
+      const fonts: Record<string, mupdf.PDFObject> = {};
+      let ops = "BT\n1 1 1 rg\n";
+      for (const ov of overlays) {
+        const w = Math.max(1, ov.rect[2] - ov.rect[0]);
+        const h = Math.max(1, ov.rect[3] - ov.rect[1]);
+        let sz = Math.max(5, Math.min(9.5, h * 0.65));
+        let enc = this.encodeLineOps(ov.text, "Helvetica-Bold", sz, fonts);
+        if (enc.width > w - 3 && enc.width > 0) {
+          sz = Math.max(4, sz * ((w - 3) / enc.width));
+          enc = this.encodeLineOps(ov.text, "Helvetica-Bold", sz, fonts);
+        }
+        const x = ov.rect[0] + Math.max(1, (w - enc.width) / 2);
+        const y = ov.rect[1] + h / 2 + sz * 0.34;
+        ops += `1 0 0 -1 ${n3(x)} ${n3(y)} Tm ${enc.ops}\n`;
+      }
+      ops += "ET";
+      this.appendContent(index, ops, fonts);
+    }
+  }
+
+  /** Localiza e marca automaticamente dados sensíveis (CPF, CNPJ, e-mail, telefone, CEP, RG, cartão ou termo/regex) para redação. */
+  redactByPatterns(req: SmartRedactRequest): SmartRedactResult {
+    const total = this.d().countPages();
+    const targetPages = req.pages?.length ? req.pages : Array.from({ length: total }, (_, i) => i);
+    const byPage: { page: number; matches: { rect: Rect; label: string }[] }[] = [];
+    const byLabel: Record<string, number> = {};
+    let marked = 0;
+
+    for (const pi of targetPages) {
+      if (pi < 0 || pi >= total) continue;
+      const found = findPatternMatches(this.pageText(pi), req);
+      if (!found.length) continue;
+      byPage.push({ page: pi, matches: found });
+      for (const m of found) {
+        marked++;
+        byLabel[m.label] = (byLabel[m.label] ?? 0) + 1;
+      }
+    }
+
+    if (marked > 0) {
+      const tpl = req.overlayText?.trim() ?? "";
+      this.op("Marcar redação inteligente", () => {
+        for (const entry of byPage) {
+          const page = this.d().loadPage(entry.page);
+          for (const m of entry.matches) {
+            const a = page.createAnnotation("Redact");
+            a.setRect(m.rect);
+            if (tpl) a.setContents(tpl.replaceAll("{tipo}", m.label));
+            a.update();
+          }
           page.destroy();
         }
       });
     }
-    return { pages: pages.length, info: this.info() };
+    return { marked, pages: byPage.length, byLabel, info: this.info() };
   }
 
   addAnnotation(index: number, spec: NewAnnot, author = ""): DocInfo {
@@ -673,6 +952,7 @@ export class PdfEngine {
         }
         case "Redact":
           a.setRect(spec.rect);
+          if (spec.overlayText?.trim()) a.setContents(spec.overlayText.trim());
           break;
       }
       a.update();
@@ -704,10 +984,273 @@ export class PdfEngine {
   /** Aplica de verdade as redações pendentes da página (remove o conteúdo coberto). */
   applyRedactions(index: number): DocInfo {
     this.op("Aplicar redação", () => {
-      const page = this.d().loadPage(index);
-      page.applyRedactions(true, mupdf.PDFPage.REDACT_IMAGE_PIXELS,
-        mupdf.PDFPage.REDACT_LINE_ART_REMOVE_IF_COVERED, mupdf.PDFPage.REDACT_TEXT_REMOVE);
+      this.applyPageRedactionsInner(index);
+    });
+    return this.info();
+  }
+
+  // ---------- resumo de comentários ----------
+
+  /** Lista todas as anotações com o trecho de texto marcado sob realces/sublinhados/redações. */
+  commentsSummary(): CommentSummaryItem[] {
+    const doc = this.d();
+    const n = doc.countPages();
+    const out: CommentSummaryItem[] = [];
+    const markupKinds = new Set(["Highlight", "Underline", "StrikeOut", "Squiggly", "Redact"]);
+    for (let i = 0; i < n; i++) {
+      const anns = this.annotations(i).filter((a) => a.kind !== "Link" && a.kind !== "Widget");
+      if (!anns.length) continue;
+      const p = doc.loadPage(i);
+      const pageLabel = p.getLabel() || String(i + 1);
+      p.destroy();
+      const blocks = anns.some((a) => markupKinds.has(a.kind)) ? this.pageText(i) : null;
+      for (const a of anns) {
+        const quote = blocks && markupKinds.has(a.kind) ? extractTextInRect(blocks, a.rect) : "";
+        out.push({
+          page: i,
+          pageLabel,
+          kind: a.kind,
+          author: a.author,
+          contents: a.contents,
+          quote,
+          color: a.color,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Exporta o resumo de comentários em Markdown, CSV ou PDF A4. */
+  exportCommentsSummary(format: "md" | "csv" | "pdf"): Uint8Array {
+    const items = this.commentsSummary();
+    const title = this.d().getMetaData("info:Title") || this.title;
+    if (format === "pdf") return buildCommentsSummaryPdf(items, title);
+    const text = format === "csv" ? formatCommentsCsv(items) : formatCommentsMarkdown(items, title);
+    return new TextEncoder().encode(text);
+  }
+
+  // ---------- anexos embutidos ----------
+
+  attachments(): AttachmentInfo[] {
+    const doc = this.d();
+    let files: Record<string, mupdf.PDFObject>;
+    try { files = doc.getEmbeddedFiles(); } catch { return []; }
+    const out: AttachmentInfo[] = [];
+    for (const [key, ref] of Object.entries(files)) {
+      let filename = key;
+      let mimetype = "application/octet-stream";
+      let size = 0;
+      try {
+        const params = doc.getFilespecParams(ref);
+        if (params.filename) filename = params.filename;
+        if (params.mimetype) mimetype = params.mimetype;
+      } catch { /* fallback abaixo */ }
+      try {
+        const buf = doc.getEmbeddedFileContents(ref);
+        if (buf) { size = buf.getLength(); buf.destroy(); }
+      } catch { /* tamanho desconhecido */ }
+      out.push({ key, filename, mimetype, size });
+    }
+    return out.sort((a, b) => a.filename.localeCompare(b.filename, "pt-BR"));
+  }
+
+  getAttachmentData(key: string): Uint8Array {
+    const doc = this.d();
+    const files = doc.getEmbeddedFiles();
+    const ref = files[key];
+    if (!ref) throw new Error(`Anexo não encontrado: ${key}`);
+    const buf = doc.getEmbeddedFileContents(ref);
+    if (!buf) throw new Error(`Não foi possível ler o anexo: ${key}`);
+    const bytes = new Uint8Array(buf.asUint8Array());
+    buf.destroy();
+    return bytes;
+  }
+
+  addAttachment(filename: string, bytes: Uint8Array, mimetype = "application/octet-stream"): DocInfo {
+    const cleanName = filename.trim() || "anexo.bin";
+    this.op("Anexar arquivo", () => {
+      const doc = this.d();
+      const efDict = doc.newDictionary();
+      efDict.put("Type", doc.newName("EmbeddedFile"));
+      efDict.put("Subtype", doc.newName(mimetype));
+      const params = doc.newDictionary();
+      params.put("Size", bytes.length);
+      efDict.put("Params", params);
+      const efRef = doc.addStream(bytes, efDict);
+
+      const ef = doc.newDictionary();
+      ef.put("F", efRef);
+      ef.put("UF", efRef);
+      const fs = doc.newDictionary();
+      fs.put("Type", doc.newName("Filespec"));
+      fs.put("F", doc.newString(cleanName));
+      fs.put("UF", pdfUnicodeString(doc, cleanName));
+      fs.put("EF", ef);
+      const fsRef = doc.addObject(fs);
+      doc.insertEmbeddedFile(cleanName, fsRef);
+    });
+    return this.info();
+  }
+
+  deleteAttachment(key: string): DocInfo {
+    this.op("Remover anexo", () => {
+      this.d().deleteEmbeddedFile(key);
+    });
+    return this.info();
+  }
+
+  // ---------- camadas (OCG) ----------
+
+  layers(): LayerInfo[] {
+    const doc = this.d();
+    let n = 0;
+    try { n = doc.countLayers(); } catch { return []; }
+    const out: LayerInfo[] = [];
+    for (let i = 0; i < n; i++) {
+      out.push({
+        index: i,
+        name: doc.getLayerName(i) || `Camada ${i + 1}`,
+        visible: doc.isLayerVisible(i),
+      });
+    }
+    return out;
+  }
+
+  setLayerVisibility(index: number, visible: boolean): LayerInfo[] {
+    const doc = this.d();
+    const n = doc.countLayers();
+    if (index >= 0 && index < n) doc.setLayerVisible(index, visible);
+    return this.layers();
+  }
+
+  // ---------- links e marcadores automáticos ----------
+
+  links(index: number): LinkInfo[] {
+    const doc = this.d();
+    const n = doc.countPages();
+    const page = doc.loadPage(index);
+    const out: LinkInfo[] = [];
+    try {
+      const list = page.getLinks();
+      list.forEach((l, i) => {
+        const uri = l.getURI() || "";
+        const isExternal = /^(https?:|mailto:)/i.test(uri);
+        let targetPage = -1;
+        if (!isExternal && uri) {
+          try {
+            const p = doc.resolveLink(uri);
+            if (typeof p === "number" && p >= 0 && p < n) targetPage = p;
+          } catch { /* destino interno inválido */ }
+        }
+        out.push({ index: i, rect: l.getBounds() as Rect, uri, isExternal, targetPage });
+      });
+    } finally {
       page.destroy();
+    }
+    return out;
+  }
+
+  addLink(index: number, rect: Rect, target: { page: number } | { uri: string }): DocInfo {
+    const doc = this.d();
+    const n = doc.countPages();
+    let uri: string;
+    if ("uri" in target) {
+      const u = target.uri.trim();
+      if (!/^(https?:\/\/|mailto:)/i.test(u)) throw new Error("Informe um endereço começando com https://, http:// ou mailto:.");
+      uri = u;
+    } else {
+      const p = Math.max(0, Math.min(n - 1, Math.floor(target.page)));
+      try { uri = doc.formatLinkURI(new mupdf.LinkDestination(0, p, "Fit")); }
+      catch { uri = `#page=${p + 1}`; }
+    }
+    this.op("Inserir link", () => {
+      const page = doc.loadPage(index);
+      page.createLink(rect, uri);
+      page.destroy();
+    });
+    return this.info();
+  }
+
+  deleteLink(index: number, linkIndex: number): DocInfo {
+    this.op("Excluir link", () => {
+      const page = this.d().loadPage(index);
+      const list = page.getLinks();
+      if (linkIndex >= 0 && linkIndex < list.length) page.deleteLink(list[linkIndex]);
+      page.destroy();
+    });
+    return this.info();
+  }
+
+  /** Gera a árvore de marcadores automaticamente a partir dos títulos detectados no texto. */
+  autoOutline(): { count: number; info: DocInfo } {
+    const n = this.d().countPages();
+    const pages: TextBlock[][] = [];
+    for (let i = 0; i < n; i++) pages.push(this.pageText(i));
+    const nodes = detectHeadingOutline(pages);
+    const countNodes = (list: OutlineNode[]): number => list.reduce((s, x) => s + 1 + countNodes(x.children), 0);
+    const count = countNodes(nodes);
+    if (count > 0) this.setOutline(nodes);
+    return { count, info: this.info() };
+  }
+
+  // ---------- numeração Bates e rótulos de página ----------
+
+  /**
+   * Numeração Bates sequencial (ex.: PROC-000001). Devolve o próximo número livre
+   * para encadear automaticamente vários arquivos em lote.
+   */
+  addBatesNumbering(spec: BatesSpec): { nextNumber: number; info: DocInfo } {
+    const total = this.d().countPages();
+    const pages = spec.pages?.length ? spec.pages : Array.from({ length: total }, (_, i) => i);
+    const prefix = spec.prefix ?? "";
+    const suffix = spec.suffix ?? "";
+    const digits = Math.max(1, Math.min(12, Math.floor(spec.digits ?? 6)));
+    const pos = spec.pos ?? "br";
+    const size = spec.size ?? 10;
+    const margin = spec.margin ?? 24;
+    const color = spec.color ?? [0.15, 0.15, 0.15];
+    let num = Math.max(0, Math.floor(spec.startNumber));
+
+    this.op("Numeração Bates", () => {
+      for (const index of pages) {
+        if (index < 0 || index >= total) continue;
+        const text = `${prefix}${String(num++).padStart(digits, "0")}${suffix}`;
+        const page = this.d().loadPage(index);
+        const [x0, y0, x1, y1] = page.getBounds();
+        page.destroy();
+        const fonts: Record<string, mupdf.PDFObject> = {};
+        const enc = this.encodeLineOps(text, "Helvetica", size, fonts);
+        const x = pos[1] === "l" ? x0 + margin : pos[1] === "r" ? x1 - margin - enc.width : (x0 + x1 - enc.width) / 2;
+        const y = pos[0] === "t" ? y0 + margin + size * 0.75 : y1 - margin;
+        const ops = `BT\n${rg(color)}\n1 0 0 -1 ${n3(x)} ${n3(y)} Tm ${enc.ops}\nET`;
+        this.appendContent(index, ops, fonts);
+      }
+    });
+    return { nextNumber: num, info: this.info() };
+  }
+
+  /** Define intervalos de rótulos de página (/PageLabels), ex.: algarismos romanos na capa/sumário e arábicos no corpo. */
+  setPageLabelRules(rules: PageLabelRule[]): DocInfo {
+    const total = this.d().countPages();
+    const sorted = [...rules]
+      .filter((r) => Number.isInteger(r.startPage) && r.startPage >= 0 && r.startPage < total)
+      .sort((a, b) => a.startPage - b.startPage);
+    this.op("Rótulos de página", () => {
+      const doc = this.d();
+      const root = doc.getTrailer().get("Root").resolve();
+      if (root.isDictionary()) root.delete("PageLabels");
+      for (const r of sorted) {
+        const style = r.style === "none" ? mupdf.PDFDocument.PAGE_LABEL_NONE : r.style;
+        doc.setPageLabels(r.startPage, style, r.prefix ?? "", Math.max(1, Math.floor(r.startAt ?? 1)));
+      }
+    });
+    return this.info();
+  }
+
+  clearPageLabels(): DocInfo {
+    this.op("Limpar rótulos de página", () => {
+      const root = this.d().getTrailer().get("Root").resolve();
+      if (root.isDictionary()) root.delete("PageLabels");
     });
     return this.info();
   }
@@ -748,6 +1291,57 @@ export class PdfEngine {
     return this.info();
   }
 
+  /** Cria um campo de formulário interativo (texto, caixa de seleção, lista ou assinatura). */
+  createField(spec: CreateFieldSpec): { id: number; info: DocInfo } {
+    let id = 0;
+    this.op("Criar campo de formulário", () => {
+      id = addFormField(this.d(), spec);
+    });
+    return { id, info: this.info() };
+  }
+
+  /** Remove um campo de formulário da página e do AcroForm. */
+  deleteField(pageIndex: number, id: number): DocInfo {
+    this.op("Remover campo de formulário", () => {
+      removeFormField(this.d(), pageIndex, id);
+    });
+    return this.info();
+  }
+
+  /** Detecta e cria automaticamente campos de formulário (linhas, caixas [ ] e rótulos com :) na página. */
+  autoDetectFields(pageIndex: number): { created: number; info: DocInfo } {
+    const page = this.d().loadPage(pageIndex);
+    const bounds = page.getBounds() as Rect;
+    page.destroy();
+    const existing = this.fields(pageIndex).map((f) => f.rect);
+    const blocks = this.pageText(pageIndex);
+    const specs = detectCandidateFields(pageIndex, bounds, blocks, existing);
+    if (specs.length) {
+      this.op("Detectar campos de formulário", () => {
+        for (const s of specs) addFormField(this.d(), s);
+      });
+    }
+    return { created: specs.length, info: this.info() };
+  }
+
+  // ---------- assinatura digital criptográfica (ICP-Brasil A1 .pfx/.p12) ----------
+
+  inspectPfx(pfxBytes: Uint8Array, password: string): PfxCertInfo {
+    return inspectPfx(pfxBytes, password);
+  }
+
+  /** Gera uma cópia assinada digitalmente com certificado A1 (.pfx/.p12) no padrão adbe.pkcs7.detached. */
+  signDigital(opts: DigitalSignOptions): { bytes: Uint8Array; cert: PfxCertInfo } {
+    const current = this.peekBytes();
+    return signPdfBytes(current, opts, this.password);
+  }
+
+  /** Verifica offline todas as assinaturas digitais PKCS#7/CMS presentes nos bytes informados (ou no documento aberto). */
+  verifySignatures(rawBytes?: Uint8Array): SignatureVerifyInfo[] {
+    const bytes = rawBytes ?? this.baselineBytes ?? this.peekBytes();
+    return verifyPdfSignatures(bytes, this.password);
+  }
+
   // ---------- organizar páginas ----------
 
   rotatePages(indices: number[], degrees: number): DocInfo {
@@ -760,6 +1354,12 @@ export class PdfEngine {
       }
     });
     return this.info();
+  }
+
+  /** Rotação atual da página (0, 90, 180 ou 270 graus). */
+  pageRotation(index: number): number {
+    const r = this.d().findPage(index).getInheritable("Rotate");
+    return r.isNull() ? 0 : ((r.asNumber() % 360) + 360) % 360;
   }
 
   deletePages(indices: number[]): DocInfo {
@@ -1565,6 +2165,33 @@ export class PdfEngine {
     return out;
   }
 
+  /** Página para impressão vetorial (SVG em pé; páginas deitadas giram 90°). Retorna null se exceder o limite seguro. */
+  printSvg(index: number, maxBytes = 8_000_000): string | null {
+    const page = this.d().loadPage(index);
+    const [x0, y0, x1, y1] = page.getBounds();
+    const w = x1 - x0, h = y1 - y0;
+    const landscape = w > h;
+    const outW = landscape ? h : w;
+    const outH = landscape ? w : h;
+    let m: mupdf.Matrix = mupdf.Matrix.translate(-x0, -y0);
+    if (landscape) m = mupdf.Matrix.concat(m, mupdf.Matrix.concat(mupdf.Matrix.rotate(90), mupdf.Matrix.translate(h, 0)));
+    const buf = new mupdf.Buffer();
+    const writer = new mupdf.DocumentWriter(buf, "svg", "");
+    try {
+      const dev = writer.beginPage([0, 0, outW, outH]);
+      page.run(dev, m);
+      writer.endPage();
+      writer.close();
+      if (buf.getLength() > maxBytes) return null;
+      return buf.asString();
+    } catch {
+      return null;
+    } finally {
+      buf.destroy();
+      page.destroy();
+    }
+  }
+
   /** Página para impressão: PNG em pé (páginas deitadas são giradas 90° para aproveitar a folha). */
   printImage(index: number, dpi: number): Uint8Array {
     const page = this.d().loadPage(index);
@@ -1585,19 +2212,87 @@ export class PdfEngine {
     return chars < 20;
   }
 
-  /** Reconhece a página e acrescenta uma camada de texto invisível, pesquisável. */
-  async ocrPage(index: number, recognize: Recognizer, dpi = 300): Promise<{ words: number; info: DocInfo }> {
+  /**
+   * Reconhece a página (com pré-processamento opcional: auto-orientação 0°/90°/180°/270°,
+   * remoção local de sombras, contraste e endireitamento fino ±6°) e acrescenta texto invisível pesquisável.
+   */
+  async ocrPage(
+    index: number,
+    recognize: Recognizer,
+    dpi = 300,
+    cleanup = true,
+  ): Promise<{ words: number; deskewDeg: number; enhanced: boolean; shadowRemoved: boolean; orientedDeg: QuarterTurn; info: DocInfo }> {
     const scale = dpi / 72;
     const doc = this.d();
     const page = doc.loadPage(index);
-    const [bx0, by0] = page.getBounds();
-    page.destroy();
-    const words = (await recognize(this.renderPng(index, scale))).filter((w) => w.text.trim() && (w.confidence ?? 100) >= 30);
+    const pix = page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB, false, true);
+    let rawRgb: Uint8Array;
+    let imgW = pix.getWidth();
+    let imgH = pix.getHeight();
+    let png: Uint8Array | null = null;
+    try {
+      rawRgb = new Uint8Array(pix.getPixels());
+      if (!cleanup && !recognize.recognizeRgb) png = new Uint8Array(pix.asPNG());
+    } finally {
+      pix.destroy();
+      page.destroy();
+    }
+
+    let orientedDeg: QuarterTurn = 0;
+    let deskewDeg = 0;
+    let enhanced = false;
+    let shadowRemoved = false;
+    let ocrBuf: Uint8Array = rawRgb;
+    let ocrComps = 3;
+
+    if (cleanup) {
+      // 1. Auto-orientação neural (0°/90°/180°/270°) quando o motor suporta
+      if (recognize.detectOrientation) {
+        const ori = await recognize.detectOrientation(rawRgb, imgW, imgH, 3);
+        if (ori.fixCwDeg !== 0 && ori.confidence >= 0.70) {
+          const rot = rotatePixels90(rawRgb, imgW, imgH, 3, ori.fixCwDeg);
+          rawRgb = rot.pixels;
+          imgW = rot.width;
+          imgH = rot.height;
+          orientedDeg = ori.fixCwDeg;
+        }
+      }
+      // 2. Remoção local de sombras + contraste adaptativo + deskew fino ±6°
+      const prep = preprocessPixelsForOcr(rawRgb, imgW, imgH, 3);
+      png = prep.png;
+      ocrBuf = prep.gray;
+      ocrComps = 1;
+      imgW = prep.width;
+      imgH = prep.height;
+      deskewDeg = prep.deskewDeg;
+      enhanced = prep.enhanced;
+      shadowRemoved = prep.shadowRemoved;
+    }
+
+    const recognized = recognize.recognizeRgb
+      ? await recognize.recognizeRgb(ocrBuf, imgW, imgH, ocrComps)
+      : await recognize(png!);
+    const rawWords = recognized.filter((w) => w.text.trim() && (w.confidence ?? 100) >= 30);
+    const words = Math.abs(deskewDeg) >= 0.25
+      ? rawWords.map((w) => ({ ...w, bbox: unrotateOcrBox(w.bbox, imgW, imgH, deskewDeg) }))
+      : rawWords;
     // o reconhecimento leva segundos: se outro documento foi aberto nesse meio-tempo, não escreve nele
     if (this.doc !== doc) throw new Error("O documento foi trocado durante o reconhecimento de texto.");
-    if (!words.length) return { words: 0, info: this.info() };
+    if (!words.length && orientedDeg === 0) {
+      return { words: 0, deskewDeg, enhanced, shadowRemoved, orientedDeg, info: this.info() };
+    }
 
     this.op("OCR", () => {
+      if (orientedDeg !== 0) {
+        const obj = doc.findPage(index);
+        const cur = obj.getInheritable("Rotate");
+        const val = cur.isNull() ? 0 : cur.asNumber();
+        obj.put("Rotate", (((val + orientedDeg) % 360) + 360) % 360);
+      }
+      if (!words.length) return;
+      const pNow = doc.loadPage(index);
+      const [bx0, by0] = pNow.getBounds();
+      pNow.destroy();
       const fonts: Record<string, mupdf.PDFObject> = {};
       let ops = "BT\n3 Tr\n";
       for (const w of words) {
@@ -1612,7 +2307,7 @@ export class PdfEngine {
       ops += "ET";
       this.appendContent(index, ops, fonts);
     });
-    return { words: words.length, info: this.info() };
+    return { words: words.length, deskewDeg, enhanced, shadowRemoved, orientedDeg, info: this.info() };
   }
 
   // ---------- internos ----------
@@ -1629,6 +2324,7 @@ export class PdfEngine {
       fn();
       doc.endOperation();
       this.modified = true;
+      this.saveRedoStack = [];
     } catch (e) {
       doc.abandonOperation();
       this.forgetRefs();

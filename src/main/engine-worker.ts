@@ -3,8 +3,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
 import { PdfEngine, type Recognizer } from "../engine/core.ts";
-import { createRecognizer } from "../engine/ocr-node.ts";
-import type { BatchAction, BatchResult } from "../engine/types.ts";
+import { createRecognizer, type OcrQuality } from "../engine/ocr-node.ts";
+import type { BatchAction, BatchResult, SmartRedactRequest } from "../engine/types.ts";
 import { findSystemFont } from "./system-fonts.ts";
 
 type Call = { id: number; doc: number; method: string; args: unknown[] };
@@ -17,11 +17,13 @@ const engineFor = (doc: number) => {
   return e;
 };
 
-// Um reconhecedor por combinação de idiomas; trocar de idioma encerra o anterior (cada um ocupa centenas de MB).
-let ocr: { langs: string; recognize: Recognizer; dispose: () => Promise<void> } | null = null;
-async function recognizer(langs: string): Promise<Recognizer> {
-  if (ocr && ocr.langs !== langs) { await ocr.dispose().catch(() => {}); ocr = null; }
-  if (!ocr) ocr = { langs, ...(await createRecognizer(workerData.ocrCache as string, langs)) };
+// Um reconhecedor por combinação de idiomas + motor; trocar encerra o anterior.
+let ocr: { key: string; recognize: Recognizer; dispose: () => Promise<void> } | null = null;
+async function recognizer(langs: string, quality: OcrQuality = "neural"): Promise<Recognizer> {
+  // No modo neural (PP-OCRv5 Latin), o mesmo modelo atende PT/EN/ES sem precisar recarregar
+  const key = quality === "neural" ? "latin@neural" : `${langs}@${quality}`;
+  if (ocr && ocr.key !== key) { await ocr.dispose().catch(() => {}); ocr = null; }
+  if (!ocr) ocr = { key, ...(await createRecognizer(workerData.ocrCache as string, langs, quality)) };
   return ocr.recognize;
 }
 
@@ -36,7 +38,7 @@ async function ensureReadableText(eng: PdfEngine, page?: number): Promise<void> 
   if (inflight) await inflight;
   if (!eng.hasUnmappedType3(page)) return;
   const job = (async () => {
-    const rec = await recognizer("por");
+    const rec = await recognizer("por", "best");
     await eng.recoverType3(rec, page);
   })();
   recovering.set(eng, job);
@@ -57,42 +59,76 @@ const special: Record<string, (this: PdfEngine, ...a: any[]) => unknown> = {
     await ensureReadableText(this, opts?.page);
     return this.replaceText(needle, replacement, opts);
   },
-  async ocrPages(pages: number[], dpi = 300, langs = "por") {
-    const rec = await recognizer(langs);
+  async redactByPatterns(req: SmartRedactRequest) {
+    await ensureReadableText(this);
+    return this.redactByPatterns(req);
+  },
+  async autoOutline() {
+    await ensureReadableText(this);
+    return this.autoOutline();
+  },
+  async commentsSummary() {
+    await ensureReadableText(this);
+    return this.commentsSummary();
+  },
+  async saveCommentsSummary(path: string, format: "md" | "csv" | "pdf") {
+    await ensureReadableText(this);
+    const bytes = this.exportCommentsSummary(format);
+    writeFileSync(path, bytes);
+    return bytes.length;
+  },
+  async autoDetectFields(page: number) {
+    await ensureReadableText(this, page);
+    return this.autoDetectFields(page);
+  },
+  async ocrPages(pages: number[], dpi = 300, langs = "por", quality: OcrQuality = "neural", cleanup = true) {
+    const rec = await recognizer(langs, quality);
     let words = 0;
+    let deskewed = 0;
+    let enhanced = 0;
+    let oriented = 0;
     let info = this.info();
     for (let k = 0; k < pages.length; k++) {
       parentPort!.postMessage({ event: "ocr-progress", data: { page: pages[k], done: k, total: pages.length } });
-      const r = await this.ocrPage(pages[k], rec, dpi);
+      const r = await this.ocrPage(pages[k], rec, dpi, cleanup);
       words += r.words;
+      if (Math.abs(r.deskewDeg) >= 0.25) deskewed++;
+      if (r.enhanced) enhanced++;
+      if (r.orientedDeg !== 0) oriented++;
       info = r.info;
     }
     parentPort!.postMessage({ event: "ocr-progress", data: { page: -1, done: pages.length, total: pages.length } });
-    return { words, info };
+    return { words, deskewed, enhanced, oriented, info };
   },
   scannedPages() {
     const n = this.info().pageCount;
     return Array.from({ length: n }, (_, i) => i).filter((i) => this.needsOcr(i));
   },
   /**
-   * Grava cada página como PNG em `dir` (para a janela de impressão). Devolve o arquivo e o
-   * tamanho real de cada folha, em polegadas e já em pé.
+   * Prepara cada página para impressão: prefere SVG vetorial nítido (texto e linhas sem pixelização)
+   * e recorre a PNG em alta resolução apenas para páginas rasterizadas muito pesadas.
    */
   printFiles(dir: string, dpi: number, pages?: number[]) {
     const info = this.info();
     const list = pages ?? Array.from({ length: info.pageCount }, (_, i) => i);
-    const out: { name: string; w: number; h: number }[] = [];
+    const out: { name: string; w: number; h: number; vector: boolean }[] = [];
     list.forEach((index, k) => {
-      progress("Preparando impressão", k, list.length);
+      progress("Preparando impressão vetorial", k, list.length);
       const p = info.pages[index];
       const short = Math.min(p.width, p.height) / 72, long = Math.max(p.width, p.height) / 72;
-      // no máximo ~3500 px no lado maior: uma prancha A0 não precisa de 9000 px para sair numa folha A4/A3
-      const eff = Math.min(dpi, 3500 / long);
-      const name = `p${String(k + 1).padStart(5, "0")}.png`;
-      writeFileSync(join(dir, name), this.printImage(index, eff));
-      out.push({ name, w: short, h: long });
+      const svg = this.printSvg(index);
+      if (svg) {
+        const name = `p${String(k + 1).padStart(5, "0")}.svg`;
+        writeFileSync(join(dir, name), svg, "utf8");
+        out.push({ name, w: short, h: long, vector: true });
+      } else {
+        const eff = Math.min(dpi, 3500 / long);
+        const name = `p${String(k + 1).padStart(5, "0")}.png`;
+        writeFileSync(join(dir, name), this.printImage(index, eff));
+        out.push({ name, w: short, h: long, vector: false });
+      }
     });
-    progress("Preparando impressão", list.length, list.length);
+    progress("Preparando impressão vetorial", list.length, list.length);
     return out;
   },
   /** Grava páginas como imagens em `dir`. Devolve os caminhos gravados. */
@@ -129,11 +165,17 @@ const special: Record<string, (this: PdfEngine, ...a: any[]) => unknown> = {
     writeFileSync(path, "\ufeff" + csv, "utf8");
     return csv.length;
   },
-  /** Executa uma ação em lote sobre vários arquivos PDF e grava os resultados em `outDir`. */
-  async batchProcess(paths: string[], outDir: string, action: BatchAction): Promise<BatchResult> {
+  /** Executa uma ação ou pipeline de ações em lote sobre vários arquivos PDF e grava os resultados em `outDir`. */
+  async batchProcess(paths: string[], outDir: string, actionOrActions: BatchAction | BatchAction[]): Promise<BatchResult> {
+    const actions = Array.isArray(actionOrActions) ? actionOrActions : [actionOrActions];
+    if (!actions.length) return { processed: 0, failed: [] };
     const failed: { file: string; error: string }[] = [];
     let processed = 0;
-    const rec = action.kind === "ocr" ? await recognizer(action.langs) : null;
+    const ocrAction = actions.find((a): a is Extract<BatchAction, { kind: "ocr" }> => a.kind === "ocr");
+    const rec = ocrAction ? await recognizer(ocrAction.langs) : null;
+    const batesCounters = new Map<number, number>();
+    let batesEnd: number | undefined;
+
     for (let i = 0; i < paths.length; i++) {
       const p = paths[i];
       const name = basename(p);
@@ -143,36 +185,70 @@ const special: Record<string, (this: PdfEngine, ...a: any[]) => unknown> = {
         const bytes = new Uint8Array(readFileSync(p));
         eng.open(bytes, name.replace(/\.pdf$/i, ""));
         if (eng.needsPassword()) throw new Error("Arquivo protegido por senha.");
-        let outBytes: Uint8Array;
-        switch (action.kind) {
-          case "compress":
-            outBytes = eng.exportCompressed(action.level).bytes;
-            break;
-          case "watermark":
-            eng.addWatermark({ text: action.text, opacity: action.opacity ?? 0.18, angle: action.angle ?? 45, color: action.color });
-            outBytes = eng.save();
-            break;
-          case "number":
-            eng.addHeaderFooter({ items: [{ pos: action.pos, text: action.fmt }] });
-            outBytes = eng.save();
-            break;
-          case "sanitize":
-            eng.sanitizeMetadata();
-            outBytes = eng.save();
-            break;
-          case "flatten":
-            eng.flatten();
-            outBytes = eng.save();
-            break;
-          case "ocr": {
-            const total = eng.info().pageCount;
-            for (let pg = 0; pg < total; pg++) {
-              if (eng.needsOcr(pg)) await eng.ocrPage(pg, rec!, 300);
+        let compressOpt: Extract<BatchAction, { kind: "compress" }> | null = null;
+        for (let stepIdx = 0; stepIdx < actions.length; stepIdx++) {
+          const action = actions[stepIdx];
+          switch (action.kind) {
+            case "ocr": {
+              const total = eng.info().pageCount;
+              for (let pg = 0; pg < total; pg++) {
+                if (eng.needsOcr(pg)) await eng.ocrPage(pg, rec!, 300);
+              }
+              break;
             }
-            outBytes = eng.save();
-            break;
+            case "normalize": {
+              const total = eng.info().pageCount;
+              eng.normalizePageSizes(Array.from({ length: total }, (_, k) => k), action.target);
+              break;
+            }
+            case "redactPatterns": {
+              const r = eng.redactByPatterns({
+                patterns: action.patterns,
+                customQuery: action.customQuery,
+                isRegex: action.isRegex,
+                overlayText: action.overlayText,
+              });
+              if (r.marked > 0) eng.applyAllRedactions();
+              break;
+            }
+            case "sanitize":
+              eng.sanitizeMetadata();
+              break;
+            case "flatten":
+              eng.flatten();
+              break;
+            case "watermark":
+              eng.addWatermark({ text: action.text, opacity: action.opacity ?? 0.18, angle: action.angle ?? 45, color: action.color });
+              break;
+            case "number":
+              eng.addHeaderFooter({ items: [{ pos: action.pos, text: action.fmt }] });
+              break;
+            case "bates": {
+              const start = action.continuous !== false
+                ? (batesCounters.get(stepIdx) ?? action.startNumber)
+                : action.startNumber;
+              const res = eng.addBatesNumbering({
+                prefix: action.prefix,
+                suffix: action.suffix,
+                startNumber: start,
+                digits: action.digits,
+                pos: action.pos,
+                size: action.size,
+              });
+              if (action.continuous !== false) {
+                batesCounters.set(stepIdx, res.nextNumber);
+                batesEnd = res.nextNumber - 1;
+              }
+              break;
+            }
+            case "compress":
+              compressOpt = action;
+              break;
           }
         }
+        const outBytes = compressOpt
+          ? (compressOpt.optimize ? eng.exportOptimized(compressOpt.optimize).bytes : eng.exportCompressed(compressOpt.level).bytes)
+          : eng.save();
         const outPath = join(outDir, name);
         writeFileSync(outPath, outBytes);
         processed++;
@@ -183,7 +259,7 @@ const special: Record<string, (this: PdfEngine, ...a: any[]) => unknown> = {
       }
     }
     progress("Lote concluído", paths.length, paths.length);
-    return { processed, failed };
+    return { processed, failed, ...(batesEnd !== undefined ? { batesEnd } : {}) };
   },
 };
 

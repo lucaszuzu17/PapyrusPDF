@@ -1,10 +1,16 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
-import { cpSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import createEngineWorker from "./engine-worker.ts?nodeWorker";
+import { markdownToHtml } from "./markdown.ts";
+import { resolveLang, translate, type I18nKey, type LangPref, type UiLang } from "../shared/i18n.ts";
+
+let uiLangPref: LangPref = "auto";
+const curLang = (): UiLang => resolveLang(uiLangPref, app.getLocale());
+const mt = (key: I18nKey, vars?: Record<string, string | number>) => translate(curLang(), key, vars);
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -77,7 +83,7 @@ worker?.on("message", (msg: any) => {
 let engineDead: string | null = null;
 const engineFailed = (why: unknown) => {
   if (why) console.error("[motor]", why);
-  engineDead = "O motor de PDF parou de funcionar. Feche o PapyrusPDF e abra o arquivo de novo; o que não tinha sido salvo se perdeu.";
+  engineDead = mt("main.engineDead");
   for (const w of waiting.values()) w.reject(new Error(engineDead));
   waiting.clear();
 };
@@ -87,7 +93,7 @@ worker?.on("exit", () => engineFailed(null));
 let activeDoc = 0;
 const callEngine = (method: string, args: unknown[], doc = activeDoc) =>
   new Promise((resolve, reject) => {
-    if (!worker) return reject(new Error("Motor indisponível."));
+    if (!worker) return reject(new Error(mt("main.engineUnavailable")));
     if (engineDead) return reject(new Error(engineDead));
     const id = ++seq;
     waiting.set(id, { resolve, reject });
@@ -136,11 +142,11 @@ function createWindow(): void {
     if (!dirty || !win || e2eScript) return;
     const r = dialog.showMessageBoxSync(win, {
       type: "warning",
-      buttons: ["Sair sem salvar", "Cancelar"],
+      buttons: [mt("main.quitBtnLeave"), mt("main.quitBtnCancel")],
       defaultId: 1,
       cancelId: 1,
-      message: "Há documentos com alterações não salvas.",
-      detail: "Se sair agora, as alterações feitas desde o último salvamento serão perdidas.",
+      message: mt("main.quitMessage"),
+      detail: mt("main.quitDetail"),
     });
     if (r === 1) e.preventDefault();
   });
@@ -178,14 +184,26 @@ ipcMain.handle("engine", (_e, doc: number, method: string, args: unknown[]) => c
 const IMAGE_EXT = ["png", "jpg", "jpeg", "bmp", "gif", "webp"];
 const fileData = async (p: string) => ({ path: p, name: basename(p), bytes: new Uint8Array(await readFile(p)) });
 
-ipcMain.handle("open-dialog", async (_e, opts: { title?: string; images?: boolean; multi?: boolean }) => {
+ipcMain.handle("get-locale", () => app.getLocale());
+ipcMain.handle("set-lang", (_e, pref: LangPref) => {
+  uiLangPref = pref === "pt" || pref === "en" || pref === "es" ? pref : "auto";
+});
+
+ipcMain.handle("open-dialog", async (_e, opts: { title?: string; images?: boolean; multi?: boolean; anyFile?: boolean; pfx?: boolean; webDoc?: boolean }) => {
   if (e2eScript && hooks.open.length) return Promise.all(hooks.open.shift()!.map(fileData));
+  const filters = opts?.pfx
+    ? [{ name: mt("main.filterPfx"), extensions: ["pfx", "p12"] }]
+    : opts?.webDoc
+      ? [{ name: mt("main.filterWebDoc"), extensions: ["html", "htm", "md", "markdown"] }]
+      : opts?.anyFile
+        ? [{ name: mt("main.filterAny"), extensions: ["*"] }]
+        : opts?.images
+          ? [{ name: mt("main.filterImages"), extensions: IMAGE_EXT }]
+          : [{ name: mt("main.filterPdf"), extensions: ["pdf"] }];
   const r = await dialog.showOpenDialog(win!, {
-    title: opts?.title ?? "Abrir PDF",
+    title: opts?.title ?? mt("main.openTitle"),
     properties: opts?.multi ? ["openFile", "multiSelections"] : ["openFile"],
-    filters: opts?.images
-      ? [{ name: "Imagens", extensions: IMAGE_EXT }]
-      : [{ name: "PDF", extensions: ["pdf"] }],
+    filters,
   });
   if (r.canceled) return [];
   return Promise.all(r.filePaths.map(fileData));
@@ -193,32 +211,41 @@ ipcMain.handle("open-dialog", async (_e, opts: { title?: string; images?: boolea
 
 ipcMain.handle("read-file", (_e, path: string) => fileData(path));
 
-const SAVE_FILTERS: Record<string, Electron.FileFilter> = {
-  pdf: { name: "PDF", extensions: ["pdf"] },
-  png: { name: "Imagem PNG", extensions: ["png"] },
-  jpg: { name: "Imagem JPEG", extensions: ["jpg"] },
-  docx: { name: "Documento do Word", extensions: ["docx"] },
-  txt: { name: "Texto", extensions: ["txt"] },
-  csv: { name: "Planilha CSV (Excel)", extensions: ["csv"] },
+const saveFilter = (kind: string): Electron.FileFilter => {
+  const map: Record<string, Electron.FileFilter> = {
+    pdf: { name: mt("main.filterPdf"), extensions: ["pdf"] },
+    png: { name: mt("main.filterPng"), extensions: ["png"] },
+    jpg: { name: mt("main.filterJpg"), extensions: ["jpg"] },
+    docx: { name: mt("main.filterDocx"), extensions: ["docx"] },
+    txt: { name: mt("main.filterTxt"), extensions: ["txt"] },
+    csv: { name: mt("main.filterCsv"), extensions: ["csv"] },
+    md: { name: mt("main.filterMd"), extensions: ["md"] },
+    any: { name: mt("main.filterAny"), extensions: ["*"] },
+  };
+  return map[kind] ?? map.pdf;
 };
-const SAVE_TITLES: Record<string, string> = {
-  pdf: "Salvar PDF", png: "Salvar imagem", jpg: "Salvar imagem",
-  docx: "Salvar como Word", txt: "Salvar como texto", csv: "Salvar planilha CSV",
+const saveTitle = (kind: string): string => {
+  const map: Record<string, I18nKey> = {
+    pdf: "main.saveTitlePdf", png: "main.saveTitleImg", jpg: "main.saveTitleImg",
+    docx: "main.saveTitleDocx", txt: "main.saveTitleTxt", csv: "main.saveTitleCsv",
+    md: "main.saveTitleMd", any: "main.saveTitleAny",
+  };
+  return mt(map[kind] ?? "main.saveTitleDefault");
 };
 
 ipcMain.handle("save-dialog", async (_e, suggested: string, kind = "pdf") => {
   if (e2eScript && hooks.save.length) return hooks.save.shift()!;
   const r = await dialog.showSaveDialog(win!, {
-    title: SAVE_TITLES[kind] ?? "Salvar",
+    title: saveTitle(kind),
     defaultPath: suggested,
-    filters: [SAVE_FILTERS[kind] ?? SAVE_FILTERS.pdf],
+    filters: [saveFilter(kind)],
   });
   return r.canceled ? null : r.filePath;
 });
 
 ipcMain.handle("folder-dialog", async () => {
   if (e2eScript && hooks.folder.length) return hooks.folder.shift()!;
-  const r = await dialog.showOpenDialog(win!, { title: "Escolher pasta", properties: ["openDirectory", "createDirectory"] });
+  const r = await dialog.showOpenDialog(win!, { title: mt("main.folderTitle"), properties: ["openDirectory", "createDirectory"] });
   return r.canceled ? null : r.filePaths[0];
 });
 
@@ -261,6 +288,10 @@ ipcMain.handle("set-fullscreen", (_e, on: boolean) => { win?.setFullScreen(!!on)
 ipcMain.handle("take-pending-path", () => { rendererReady = true; const p = pendingPath; pendingPath = null; return p; });
 
 ipcMain.handle("show-in-folder", (_e, path: string) => { shell.showItemInFolder(path); });
+ipcMain.handle("open-external", (_e, url: string) => {
+  if (/^(https?:\/\/|mailto:)/i.test(url)) return shell.openExternal(url);
+  return false;
+});
 
 // --- recentes ---
 // Não confere se os arquivos existem: um caminho de rede fora do ar travaria a abertura do
@@ -291,8 +322,99 @@ ipcMain.handle("recent-clear", () => {
   return recents;
 });
 
+// --- HTML / Markdown → PDF (100% offline via Chromium embutido do Electron) ---
+ipcMain.handle("convert-to-pdf", async (_e, opts: { path: string; pageSize?: "A4" | "Letter"; landscape?: boolean }) => {
+  const srcPath = opts.path;
+  const ext = extname(srcPath).toLowerCase();
+  const baseName = basename(srcPath, ext);
+  const dir = await mkdtemp(join(tmpdir(), "papiro-html2pdf-"));
+  let bw: BrowserWindow | null = null;
+  try {
+    const offSes = session.fromPartition(`papiro-offline-${Date.now()}`, { cache: false });
+    // Bloqueia absolutamente qualquer requisição externa (http/https/ws) para manter 100% offline
+    offSes.webRequest.onBeforeRequest((details, cb) => {
+      if (/^(https?|wss?):/i.test(details.url)) cb({ cancel: true });
+      else cb({});
+    });
+    bw = new BrowserWindow({
+      show: false,
+      webPreferences: { session: offSes, sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
+    });
+    if (ext === ".md" || ext === ".markdown") {
+      const md = await readFile(srcPath, "utf8");
+      const htmlPath = join(dir, "doc.html");
+      await writeFile(htmlPath, markdownToHtml(md, baseName), "utf8");
+      await bw.loadFile(htmlPath);
+    } else {
+      await bw.loadFile(srcPath);
+    }
+    const pdfBuf = await bw.webContents.printToPDF({
+      pageSize: opts.pageSize ?? "A4",
+      landscape: !!opts.landscape,
+      printBackground: true,
+    });
+    return { name: `${baseName}.pdf`, bytes: new Uint8Array(pdfBuf) };
+  } finally {
+    if (bw && !bw.isDestroyed()) bw.destroy();
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+// --- recuperação de sessão após falha (auto-save offline) ---
+interface RecoveryEntry { id: string; name: string; origPath: string | null; savedAt: number; file: string }
+const recoveryDir = () => join(app.getPath("userData"), "recovery");
+const recoveryIndex = () => join(recoveryDir(), "index.json");
+const readRecoveryList = (): RecoveryEntry[] => {
+  try {
+    const raw = JSON.parse(readFileSync(recoveryIndex(), "utf8"));
+    return Array.isArray(raw) ? raw.filter((e) => e && typeof e.file === "string" && existsSync(join(recoveryDir(), e.file))) : [];
+  } catch { return []; }
+};
+const writeRecoveryList = (list: RecoveryEntry[]) => {
+  try {
+    mkdirSync(recoveryDir(), { recursive: true });
+    writeFileSync(recoveryIndex(), JSON.stringify(list, null, 1));
+  } catch { /* ignora erro de disco */ }
+};
+
+ipcMain.handle("recovery-list", () => {
+  if (e2eScript) return [];
+  return readRecoveryList().map(({ id, name, origPath, savedAt }) => ({ id, name, origPath, savedAt }));
+});
+ipcMain.handle("recovery-save", async (_e, entry: { id: string; name: string; origPath: string | null; bytes: Uint8Array }) => {
+  if (e2eScript) return false;
+  mkdirSync(recoveryDir(), { recursive: true });
+  const safe = entry.id.replace(/[^A-Za-z0-9_-]/g, "_");
+  const file = `${safe}.pdf`;
+  const target = join(recoveryDir(), file);
+  const tmp = `${target}.tmp`;
+  await writeFile(tmp, entry.bytes);
+  await rename(tmp, target);
+  const list = readRecoveryList().filter((x) => x.id !== entry.id);
+  list.push({ id: entry.id, name: entry.name, origPath: entry.origPath, savedAt: Date.now(), file });
+  writeRecoveryList(list);
+  return true;
+});
+ipcMain.handle("recovery-load", async (_e, id: string) => {
+  const item = readRecoveryList().find((x) => x.id === id);
+  if (!item) return null;
+  const bytes = new Uint8Array(await readFile(join(recoveryDir(), item.file)));
+  return { name: item.name, origPath: item.origPath, bytes };
+});
+ipcMain.handle("recovery-delete", (_e, id: string) => {
+  const list = readRecoveryList();
+  const hit = list.find((x) => x.id === id);
+  if (hit) rmSync(join(recoveryDir(), hit.file), { force: true });
+  writeRecoveryList(list.filter((x) => x.id !== id));
+  return true;
+});
+ipcMain.handle("recovery-clear", () => {
+  rmSync(recoveryDir(), { recursive: true, force: true });
+  return true;
+});
+
 // --- impressão ---
-// As páginas viram imagens numa janela oculta e o Chromium abre o diálogo de impressão do Windows.
+// As páginas viram SVG vetorial (ou PNG para scans gigantes) numa janela oculta e o Chromium abre o diálogo de impressão.
 const printDirs = new Set<string>(); // pastas temporárias de impressões em andamento
 ipcMain.handle("print", async (_e, doc: number, pages?: number[]) => {
   const dir = await mkdtemp(join(tmpdir(), "papiro-print-"));
@@ -301,14 +423,14 @@ ipcMain.handle("print", async (_e, doc: number, pages?: number[]) => {
   try {
     const total = pages?.length ?? ((await callEngine("info", [], doc)) as { pageCount: number }).pageCount;
     const dpi = total > 80 ? 150 : 200;
-    const sheets = (await callEngine("printFiles", [dir, dpi, pages], doc)) as { name: string; w: number; h: number }[];
+    const sheets = (await callEngine("printFiles", [dir, dpi, pages], doc)) as { name: string; w: number; h: number; vector?: boolean }[];
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>PapyrusPDF</title><style>
 html, body { height: 100%; margin: 0; padding: 0; background: #fff; }
 .p { height: 100%; width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; break-after: page; break-inside: avoid; }
 .p:last-child { break-after: auto; }
 img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
 </style></head><body>${sheets.map((s) =>
-      // tamanho real da página; se não couber na folha, encolhe mantendo a proporção
+      // tamanho real da página; SVG preserva vetores e texto nítidos na impressora
       `<div class="p"><img src="${s.name}" style="width:${s.w.toFixed(3)}in;height:${s.h.toFixed(3)}in"></div>`).join("")}</body></html>`;
     await writeFile(join(dir, "index.html"), html);
     // filha da janela principal: fechar o Papiro encerra a impressão, em vez de deixar um processo invisível
@@ -356,5 +478,10 @@ if (first) {
     createWindow();
     cleanPrintLeftovers();
   });
-  app.on("window-all-closed", () => { worker?.terminate(); app.quit(); });
+  app.on("window-all-closed", () => {
+    // Encerramento limpo: descarta rascunhos de recuperação automática
+    if (!e2eScript) rmSync(recoveryDir(), { recursive: true, force: true });
+    worker?.terminate();
+    app.quit();
+  });
 }
