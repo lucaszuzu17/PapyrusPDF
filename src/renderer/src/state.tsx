@@ -22,6 +22,7 @@ export type Layout = "single" | "double";
 /** Filtro visual da página para leitura confortável (não altera o PDF). */
 export type ReadMode = "normal" | "sepia" | "dark";
 export type ThemePref = "auto" | "light" | "dark";
+export type FileSection = "open" | "create" | "properties" | "export" | "appearance";
 
 export interface OverlayImage {
   bytes: Uint8Array;
@@ -101,7 +102,9 @@ interface Ctx {
   setTheme: (th: ThemePref) => void;
   toggleTheme: () => void;
   fileMenuOpen: boolean;
-  setFileMenuOpen: (on: boolean) => void;
+  fileMenuSection: FileSection;
+  setFileMenuSection: (s: FileSection) => void;
+  setFileMenuOpen: (on: boolean, section?: FileSection) => void;
   printOpen: boolean;
   setPrintOpen: (on: boolean) => void;
   homeOpen: boolean;
@@ -234,7 +237,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => mq.removeEventListener("change", onChange);
   }, []);
   const resolvedTheme: "light" | "dark" = theme === "auto" ? (systemDark ? "dark" : "light") : theme;
-  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const [fileMenuOpen, setFileMenuOpenRaw] = useState(false);
+  const [fileMenuSection, setFileMenuSection] = useState<FileSection>("open");
+  const setFileMenuOpen = useCallback((on: boolean, section?: FileSection) => {
+    if (on) setFileMenuSection(section ?? "open");
+    setFileMenuOpenRaw(on);
+  }, []);
   const [printOpen, setPrintOpen] = useState(false);
   const [homeOpen, setHomeOpen] = useState(false);
   const setTheme = useCallback((th: ThemePref) => {
@@ -808,7 +816,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Ctx>(() => ({
     uiLangPref, lang, systemLang, setUiLang, t,
-    theme, resolvedTheme, setTheme, toggleTheme, fileMenuOpen, setFileMenuOpen, printOpen, setPrintOpen, homeOpen, setHomeOpen,
+    theme, resolvedTheme, setTheme, toggleTheme, fileMenuOpen, fileMenuSection, setFileMenuSection, setFileMenuOpen, printOpen, setPrintOpen, homeOpen, setHomeOpen,
     doc, tabs, switchTab, closeTab, cycleTab, tool, setTool, color, setColor, zoom, setZoom, page, setPage, goTo, gotoSignal,
     view, setView, layout, setLayout, readMode, setReadMode, measureScale, setMeasureScale,
     overlayImg, setOverlayImg, compareReport, setCompareReport, fullscreen, toggleFullScreen,
@@ -817,7 +825,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     recoveryItems, restoreRecovery, dismissRecovery, busy, toast, notify, progress, scanned, ocrProgress, dialog, closeDialog, ask, askForm,
     openFile, openData, adoptFile, openDropped, save, mergeFiles, newFromImages, insertImages, printDoc, executePrint, refresh, rerender,
     undo, redo, mutate, task, runOcr, fitWidth, viewportWidth,
-  }), [uiLangPref, lang, systemLang, setUiLang, t, theme, resolvedTheme, setTheme, toggleTheme, fileMenuOpen, printOpen, homeOpen, doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
+  }), [uiLangPref, lang, systemLang, setUiLang, t, theme, resolvedTheme, setTheme, toggleTheme, fileMenuOpen, fileMenuSection, setFileMenuOpen, printOpen, homeOpen, doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
     readMode, measureScale, overlayImg, compareReport, fullscreen,
     toggleFullScreen, panel, selectedPages, search, runSearch, stepSearch, signature, stamp, ocrLang, ocrQuality, ocrCleanup,
     recoveryItems, restoreRecovery, dismissRecovery, busy, toast, notify,

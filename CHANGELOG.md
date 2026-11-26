@@ -2,6 +2,12 @@
 
 All notable changes to **PapyrusPDF** are documented in this file.
 
+## [1.0.2] — 2026-11-26
+
+### Fixed
+- **Home Screen `Appearance` Button (`src/renderer/src/Viewer.tsx`, `FileBackstage.tsx`, `state.tsx`)**:
+  - Clicking **Appearance** on the Start / Home screen now opens the `File` Backstage directly on the **Appearance & Language** section instead of defaulting to **Open / Recent Documents**.
+
 ## [1.0.1] — 2026-11-26
 
 ### Added

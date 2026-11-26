@@ -172,7 +172,7 @@ export function Welcome() {
         <button type="button" className="home-open-btn" onClick={() => app.openFile()}>
           <Icon name="open" size={16} /> {app.t("home.openFile")}
         </button>
-        <button type="button" className="home-sec-btn" onClick={() => app.setFileMenuOpen(true)}>
+        <button type="button" className="home-sec-btn" onClick={() => app.setFileMenuOpen(true, "appearance")}>
           <Icon name="sun" size={15} /> {app.t("file.appearance")}
         </button>
         <div className="grow" />

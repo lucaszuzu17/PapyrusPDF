@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 1.0.1" src="https://img.shields.io/badge/version-1.0.1-c93b2b?style=flat-square">
+  <img alt="Version 1.0.2" src="https://img.shields.io/badge/version-1.0.2-c93b2b?style=flat-square">
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-1e242b?style=flat-square">
   <img alt="Electron 45" src="https://img.shields.io/badge/Electron-45-1e242b?style=flat-square">
   <img alt="MuPDF + ONNX" src="https://img.shields.io/badge/engine-MuPDF%20%2B%20ONNX-1e242b?style=flat-square">

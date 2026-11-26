@@ -7,12 +7,12 @@ import * as feat from "./features.ts";
 import { Icon } from "./icons.tsx";
 import { useApp, type ThemePref } from "./state.tsx";
 
-type Section = "open" | "create" | "properties" | "export" | "appearance";
 type RecentItem = Awaited<ReturnType<typeof window.papiro.recentList>>[number];
 
 export function FileBackstage() {
   const app = useApp();
-  const [section, setSection] = useState<Section>("open");
+  const section = app.fileMenuSection;
+  const setSection = app.setFileMenuSection;
   const [recent, setRecent] = useState<RecentItem[]>([]);
 
   useEffect(() => {
