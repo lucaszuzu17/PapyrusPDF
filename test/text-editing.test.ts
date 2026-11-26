@@ -359,3 +359,63 @@ test("Type 3 sem /ToUnicode e com /FontBBox invertido: repara caixas, remove esp
   assert.ok(!after.includes("HOLA"), `texto original deve ter sido removido: ${after}`);
   e.close();
 });
+
+test("editar e apagar texto em PDF escaneado (imagem + OCR com fonte sem FontDescriptor) cobre os pixels antigos", async () => {
+  // Cria um PDF 100% rasterizado (imagem com texto preto sobre fundo branco), igual a faturas escaneadas
+  const src = new mupdf.PDFDocument();
+  const baseFont = src.addSimpleFont(new mupdf.Font("Helvetica"));
+  const res = src.newDictionary();
+  const fd = src.newDictionary();
+  fd.put("F0", baseFont);
+  res.put("Font", fd);
+  src.insertPage(-1, src.addPage([0, 0, 400, 120], 0, res, "BT /F0 18 Tf 0 0 0 rg 40 70 Td (CONTA 12345) Tj ET"));
+  const pix = src.loadPage(0).toPixmap(mupdf.Matrix.scale(2, 2), mupdf.ColorSpace.DeviceRGB, false, true);
+  const png = new Uint8Array(pix.asPNG());
+  pix.destroy();
+
+  const e = new PdfEngine();
+  e.imagesToPdf([png], { page: "imagem" }, "escaneado");
+  assert.equal(e.pageText(0).length, 0, "PDF rasterizado começa sem texto vetorial");
+
+  // Simula OCR adicionando camada invisível 3 Tr sobre a imagem (usa fonte Base-14 sem /FontDescriptor)
+  await e.ocrPage(0, async () => [
+    { text: "CONTA", bbox: [38 * (300 / 72), 30 * (300 / 72), 115 * (300 / 72), 54 * (300 / 72)], confidence: 98 },
+    { text: "12345", bbox: [120 * (300 / 72), 30 * (300 / 72), 185 * (300 / 72), 54 * (300 / 72)], confidence: 98 },
+  ], 300, false);
+
+  const blocks = e.pageText(0);
+  assert.ok(blocks.length >= 1, "OCR gerou bloco editável");
+  const b = blocks[0];
+  const l = b.lines[0];
+
+  // 1) Apagar completamente: não deve quebrar em simpleWidths e deve limpar os pixels pretos da imagem!
+  e.editText({
+    page: 0, area: b.bbox, areas: b.lines.map((x) => x.bbox), text: "",
+    origin: l.origin, size: l.size, color: l.color, font: l.font, erase: true,
+  });
+  const afterErase = e.render(0, 1);
+  let darkInside = 0;
+  const x0 = Math.max(0, Math.floor(b.bbox[0])), y0 = Math.max(0, Math.floor(b.bbox[1]));
+  const x1 = Math.min(afterErase.width, Math.ceil(b.bbox[2])), y1 = Math.min(afterErase.height, Math.ceil(b.bbox[3]));
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const o = (y * afterErase.width + x) * 4;
+      if (afterErase.rgba[o] < 200 || afterErase.rgba[o + 1] < 200 || afterErase.rgba[o + 2] < 200) darkInside++;
+    }
+  }
+  assert.equal(darkInside, 0, `pixels antigos da imagem deveriam estar cobertos (restaram ${darkInside})`);
+
+  // 2) Desfazer (Ctrl+Z) devolve os pixels originais da imagem e o bloco OCR
+  e.undo();
+  const afterUndo = e.pageText(0).flatMap((x) => x.lines.map((y) => y.text)).join(" ");
+  assert.match(afterUndo, /CONTA.*12345/);
+
+  // 3) Reescrever com texto novo grava o texto vetorial visível
+  e.editText({
+    page: 0, area: b.bbox, areas: b.lines.map((x) => x.bbox), text: "CONTA 99999",
+    origin: l.origin, size: l.size, color: l.color, font: l.font, erase: true,
+  });
+  const afterRewrite = e.pageText(0).flatMap((x) => x.lines.map((y) => y.text)).join(" ");
+  assert.ok(afterRewrite.includes("CONTA 99999"), `novo texto deve persistir: ${afterRewrite}`);
+  e.close();
+});

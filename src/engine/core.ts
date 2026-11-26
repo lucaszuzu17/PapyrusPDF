@@ -1460,10 +1460,37 @@ export class PdfEngine {
     const seen = this.charsByFont(page).get(req.font) ?? new Set<string>();
     const orig = symbolic || req.erase === false ? null : originalSource(page.getObject(), req.font, want, seen);
 
+    const targets = req.erase !== false
+      ? (req.areas?.length ? req.areas.map((a) => pad(a, 0.2)) : [pad(req.area, 0.35)])
+      : [];
+    const cropScale = 2;
+    const cropMargin = 2.5;
+    const snapRegion = (p: mupdf.PDFPage, r: Rect) => {
+      const [bx0, by0, bx1, by1] = p.getBounds();
+      const x0 = Math.max(bx0, r[0] - cropMargin);
+      const y0 = Math.max(by0, r[1] - cropMargin);
+      const x1 = Math.min(bx1, r[2] + cropMargin);
+      const y1 = Math.min(by1, r[3] + cropMargin);
+      const w = Math.max(1, Math.min(1200, Math.ceil((x1 - x0) * cropScale)));
+      const h = Math.max(1, Math.min(400, Math.ceil((y1 - y0) * cropScale)));
+      const pix = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, w, h], false);
+      pix.clear(255);
+      const m = mupdf.Matrix.concat(mupdf.Matrix.translate(-x0, -y0), mupdf.Matrix.scale(cropScale, cropScale));
+      const dev = new mupdf.DrawDevice(mupdf.Matrix.identity, pix);
+      try {
+        p.run(dev, m);
+        dev.close();
+        return { w, h, rgb: new Uint8Array(pix.getPixels()) };
+      } finally {
+        pix.destroy();
+      }
+    };
+
+    const beforeSnaps = targets.map((r) => snapRegion(page, r));
+
     if (req.erase !== false) {
       // Se foram informados os retângulos linha a linha, redige cada linha separadamente para
       // não apagar texto de colunas ou células vizinhas.
-      const targets = req.areas?.length ? req.areas.map((a) => pad(a, 0.2)) : [pad(req.area, 0.35)];
       for (const r of targets) {
         const red = page.createAnnotation("Redact");
         red.setRect(r);
@@ -1473,6 +1500,77 @@ export class PdfEngine {
       }
     }
     page.destroy();
+
+    // Em PDFs escaneados / rasterizados com camada OCR invisível (3 Tr), REDACT_TEXT_REMOVE
+    // remove o texto invisível mas os pixels originais da imagem ficam intactos por baixo.
+    // Detectamos isso comparando antes/depois e cobrimos a linha com a cor local do fundo da página.
+    const covers: { rect: Rect; bg: RGB }[] = [];
+    let drawColor: RGB = req.color;
+    if (targets.length) {
+      const pageAfter = this.d().loadPage(req.page);
+      try {
+        const median = (arr: number[]) => {
+          if (!arr.length) return 255;
+          arr.sort((a, b) => a - b);
+          return arr[arr.length >> 1];
+        };
+        const padPx = Math.round(cropMargin * cropScale);
+        targets.forEach((r, idx) => {
+          const bef = beforeSnaps[idx];
+          const aft = snapRegion(pageAfter, r);
+          if (bef.w !== aft.w || bef.h !== aft.h) return;
+          const ix0 = Math.min(bef.w - 1, padPx);
+          const iy0 = Math.min(bef.h - 1, padPx);
+          const ix1 = Math.max(ix0 + 1, bef.w - padPx);
+          const iy1 = Math.max(iy0 + 1, bef.h - padPx);
+          let changed = 0;
+          for (let y = iy0; y < iy1; y++) {
+            for (let x = ix0; x < ix1; x++) {
+              const o = (y * bef.w + x) * 3;
+              if (Math.abs(bef.rgb[o] - aft.rgb[o]) + Math.abs(bef.rgb[o + 1] - aft.rgb[o + 1]) + Math.abs(bef.rgb[o + 2] - aft.rgb[o + 2]) > 24) {
+                changed++;
+              }
+            }
+          }
+          if (changed > 0) return; // texto vetorial foi efetivamente apagado: não cobre o fundo
+
+          // Amostra o anel externo (borda de 2 px) para descobrir a cor exata do fundo local
+          const rs: number[] = [], gs: number[] = [], bs: number[] = [];
+          for (let y = 0; y < aft.h; y++) {
+            for (let x = 0; x < aft.w; x++) {
+              if (x >= ix0 && x < ix1 && y >= iy0 && y < iy1) continue;
+              const o = (y * aft.w + x) * 3;
+              rs.push(aft.rgb[o]); gs.push(aft.rgb[o + 1]); bs.push(aft.rgb[o + 2]);
+            }
+          }
+          const bgR = median(rs), bgG = median(gs), bgB = median(bs);
+          const bg: RGB = [bgR / 255, bgG / 255, bgB / 255];
+          // Folga horizontal um pouco maior (2 pt) para cobrir eventual borda direita de caixas OCR
+          covers.push({ rect: [r[0] - 1.5, r[1] - 0.9, r[2] + 2.2, r[3] + 0.9], bg });
+
+          // Se o texto OCR veio com cor padrão preta sobre um fundo escuro (ex.: cabeçalho roxo da Vivo),
+          // usa a cor de maior contraste dentro da área (tipicamente branco).
+          const bgLum = (0.299 * bgR + 0.587 * bgG + 0.114 * bgB) / 255;
+          if (idx === 0 && bgLum < 0.45 && req.color[0] === 0 && req.color[1] === 0 && req.color[2] === 0) {
+            let bestDist = 0, bestRgb: RGB = [1, 1, 1];
+            for (let y = iy0; y < iy1; y++) {
+              for (let x = ix0; x < ix1; x++) {
+                const o = (y * aft.w + x) * 3;
+                const d = Math.abs(aft.rgb[o] - bgR) + Math.abs(aft.rgb[o + 1] - bgG) + Math.abs(aft.rgb[o + 2] - bgB);
+                if (d > bestDist) {
+                  bestDist = d;
+                  bestRgb = [aft.rgb[o] / 255, aft.rgb[o + 1] / 255, aft.rgb[o + 2] / 255];
+                }
+              }
+            }
+            if (bestDist > 120) drawColor = bestRgb;
+            else drawColor = [1, 1, 1];
+          }
+        });
+      } finally {
+        pageAfter.destroy();
+      }
+    }
 
     const b14 = this.base14Source(base14For(effFont));
     const sources: GlyphSource[] = orig ? [orig] : [];
@@ -1498,29 +1596,37 @@ export class PdfEngine {
     const boxW = req.maxWidth ?? Math.max(0, req.area[2] - req.area[0]);
     const align = req.align ?? "left";
     const fonts: Record<string, mupdf.PDFObject> = {};
-    let ops = `BT\n${rg(req.color)}\n`;
-    lines.forEach((ln, k) => {
-      const lw = measure(ln);
-      const dx = align === "center" && boxW > lw ? (boxW - lw) / 2
-        : align === "right" && boxW > lw ? boxW - lw : 0;
-      ops += `1 0 0 -1 ${n3(req.origin[0] + dx)} ${n3(req.origin[1] + k * lh)} Tm\n`;
-      let cur: GlyphSource | null = null, hex = "";
-      const flush = () => { if (cur && hex) ops += `/${cur.key} ${n3(req.size)} Tf <${hex}> Tj\n`; hex = ""; };
-      for (const ch of ln) {
-        const { s, g, sub } = pick(ch);
-        if (s !== cur) { flush(); cur = s; }
-        hex += g.code.toString(16).padStart(s.twoByte ? 4 : 2, "0");
-        fonts[s.key] = s.ref;
-        if (!ch.trim()) continue;
-        if (sub) { used.substituted++; used.fallback = true; }
-        else if (s.kind === "original") used.original = s.label;
-        else if (s.kind === "system") used.system ??= s.label;
-        else used.fallback = true;
-      }
-      flush();
-    });
-    ops += "ET";
-    this.appendContent(req.page, ops, fonts);
+    let ops = "";
+    for (const c of covers) {
+      const [x0, y0, x1, y1] = c.rect;
+      ops += `${rg(c.bg)}\n${n3(x0)} ${n3(y0)} ${n3(x1 - x0)} ${n3(y1 - y0)} re f\n`;
+    }
+    const hasText = lines.some((ln) => ln.trim().length > 0);
+    if (hasText) {
+      ops += `BT\n${rg(drawColor)}\n`;
+      lines.forEach((ln, k) => {
+        const lw = measure(ln);
+        const dx = align === "center" && boxW > lw ? (boxW - lw) / 2
+          : align === "right" && boxW > lw ? boxW - lw : 0;
+        ops += `1 0 0 -1 ${n3(req.origin[0] + dx)} ${n3(req.origin[1] + k * lh)} Tm\n`;
+        let cur: GlyphSource | null = null, hex = "";
+        const flush = () => { if (cur && hex) ops += `/${cur.key} ${n3(req.size)} Tf <${hex}> Tj\n`; hex = ""; };
+        for (const ch of ln) {
+          const { s, g, sub } = pick(ch);
+          if (s !== cur) { flush(); cur = s; }
+          hex += g.code.toString(16).padStart(s.twoByte ? 4 : 2, "0");
+          fonts[s.key] = s.ref;
+          if (!ch.trim()) continue;
+          if (sub) { used.substituted++; used.fallback = true; }
+          else if (s.kind === "original") used.original = s.label;
+          else if (s.kind === "system") used.system ??= s.label;
+          else used.fallback = true;
+        }
+        flush();
+      });
+      ops += "ET";
+    }
+    if (ops) this.appendContent(req.page, ops, fonts);
   }
 
   /**

@@ -218,7 +218,8 @@ function simpleWidths(font: mupdf.PDFObject): { first: number; last: number; wid
   const list: number[] = [];
   const ws = R(font.get("Widths"));
   if (ws.isArray()) ws.forEach((v) => list.push(num(R(v), 0)));
-  const missing = num(R(font.get("FontDescriptor")).get("MissingWidth"), 0);
+  const fd = R(font.get("FontDescriptor"));
+  const missing = fd.isDictionary() ? num(fd.get("MissingWidth"), 0) : 0;
   return { first, last, width: (code) => list[code - first] ?? missing };
 }
 
