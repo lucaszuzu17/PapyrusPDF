@@ -39,6 +39,11 @@ const api = {
   setState: (s: { dirty: boolean; title: string; doc: number }) => ipcRenderer.send("state", s),
   setFullScreen: (on: boolean): Promise<boolean> => ipcRenderer.invoke("set-fullscreen", on),
   onFullScreen: (cb: (on: boolean) => void) => on("fullscreen", cb),
+  winMinimize: (): Promise<void> => ipcRenderer.invoke("win-minimize"),
+  winMaximize: (): Promise<boolean> => ipcRenderer.invoke("win-maximize"),
+  winClose: (): Promise<void> => ipcRenderer.invoke("win-close"),
+  winIsMaximized: (): Promise<boolean> => ipcRenderer.invoke("win-is-maximized"),
+  onWinMaximized: (cb: (max: boolean) => void) => on("win-maximized", cb),
   takePendingPath: (): Promise<string | null> => ipcRenderer.invoke("take-pending-path"),
   /** Caminho no disco de um arquivo arrastado para a janela ("" se não vier do disco). */
   pathForFile: (file: File): string => { try { return webUtils.getPathForFile(file); } catch { return ""; } },

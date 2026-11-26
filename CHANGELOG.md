@@ -2,6 +2,21 @@
 
 All notable changes to **PapyrusPDF** are documented in this file.
 
+## [1.0.1] — 2026-11-26
+
+### Added
+- **Foxit-Style Integrated Top Title Bar (`src/renderer/src/TitleBar.tsx`)**:
+  - Replaced the standard OS window chrome (`titleBarStyle: "hidden"`) with a unified custom top title bar in the **Monogram P** palette (`#1E242B` charcoal, `#F6ECDC` cream, `#D4A24C` antique gold, `#C93B2B` crimson).
+  - Left: **PapyrusPDF** brand icon, Quick Access Toolbar (**Open, Save, Print, Save As, Merge, Undo, Redo, Select/Hand toggle**), and **Start** (Home) button.
+  - Center: Integrated **Search** bar for instant document search (`Enter` / `Shift+Enter`, live match counter `1/N`, next/previous buttons, and clear).
+  - Right: 1-click **Day/Night theme toggle**, **Language** selector, and custom native-style **Minimize / Maximize-Restore / Close** window controls.
+  - Cleaned up the Ribbon tab strip beneath the title bar (`File` in crimson `#C93B2B` + clean tabs + collapse toggle) and aligned `File` Backstage and modals cleanly below the 38px title bar.
+
+### Fixed
+- **Day/Night Theme Toggle Requiring 2 Clicks (`src/renderer/src/state.tsx`)**:
+  - Added reactive `resolvedTheme` tracking `prefers-color-scheme` and `toggleTheme()`, so clicking the sun/moon icon always switches immediately in **1 click** between Light and Dark mode (`System Auto` remains selectable in `File → Appearance`).
+  - Fixed dark-mode CSS rules (`.form-error` and `.cmp-list`) to honor explicit `data-theme="light"` / `data-theme="dark"` overrides.
+
 ## [1.0.0] — 2026-11-26
 
 ### Added

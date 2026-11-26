@@ -7,6 +7,7 @@ import { Organizer } from "./Organizer.tsx";
 import { Ribbon } from "./Ribbon.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { AppProvider, useApp, type Tool } from "./state.tsx";
+import { TitleBar } from "./TitleBar.tsx";
 import { tts, type TtsState } from "./tts.ts";
 import { Viewer, Welcome } from "./Viewer.tsx";
 
@@ -52,6 +53,7 @@ function Shell() {
   const fs = app.fullscreen;
   return (
     <div className={fs ? "app fullscreen" : "app"}>
+      {!fs && <TitleBar />}
       {!fs && <Ribbon />}
       {!fs && <TabBar />}
       {!fs && app.recoveryItems.length > 0 && (

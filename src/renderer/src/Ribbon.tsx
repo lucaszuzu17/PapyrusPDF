@@ -1,8 +1,7 @@
-// Faixa de opções estilo Foxit (nas cores do ícone PapyrusPDF): Arquivo (Backstage) + QAT + Abas → Grupos → Comandos.
+// Faixa de opções estilo Foxit (nas cores do ícone PapyrusPDF): Arquivo (Backstage) + Abas → Grupos → Comandos.
 import { useEffect, useState } from "react";
-import type { I18nKey, LangPref } from "../../shared/i18n.ts";
+import type { I18nKey } from "../../shared/i18n.ts";
 import { engine } from "./api.ts";
-import { PapyrusLogo } from "./BrandMark.tsx";
 import * as feat from "./features.ts";
 import { Icon } from "./icons.tsx";
 import { ocrLangOptions, useApp, type RGB, type Tool } from "./state.tsx";
@@ -286,35 +285,9 @@ export function Ribbon() {
   useEffect(() => tts.subscribe(setTtsTick), []);
   const active = TABS.find((x) => x.id === tab)!;
   const ocrOpts = ocrLangOptions(a.lang);
-  const sysLangLabel = a.systemLang.toUpperCase();
-  const nextTheme = () => {
-    const order: ("auto" | "light" | "dark")[] = ["auto", "light", "dark"];
-    a.setTheme(order[(order.indexOf(a.theme) + 1) % order.length]);
-  };
   return (
     <header className={collapsed ? "ribbon collapsed" : "ribbon"}>
       <nav className="ribbon-tabs" role="tablist">
-        <div className="ribbon-brand-qat">
-          <button type="button" className="brand-btn" title="PapyrusPDF" onClick={() => a.setHomeOpen(true)}>
-            <PapyrusLogo size={20} />
-            <span className="brand">PapyrusPDF</span>
-          </button>
-          <div className="qat" aria-label="Acesso rápido">
-            <button type="button" title={a.t("cmd.save.tip")} disabled={!a.doc || !!a.busy} onClick={() => a.save()}>
-              <Icon name="save" size={14} />
-            </button>
-            <button type="button" title={a.t("cmd.undo.tip")} disabled={!a.doc?.info.canUndo || !!a.busy} onClick={() => a.undo()}>
-              <Icon name="undo" size={14} />
-            </button>
-            <button type="button" title={a.t("cmd.redo.tip")} disabled={!a.doc?.info.canRedo || !!a.busy} onClick={() => a.redo()}>
-              <Icon name="redo" size={14} />
-            </button>
-            <button type="button" title={a.t("cmd.print.tip")} disabled={!a.doc || !!a.busy} onClick={() => a.printDoc()}>
-              <Icon name="print" size={14} />
-            </button>
-          </div>
-        </div>
-
         <button
           type="button"
           className={a.fileMenuOpen ? "file-tab on" : "file-tab"}
@@ -336,23 +309,6 @@ export function Ribbon() {
         ))}
 
         <div className="ribbon-right">
-          <button
-            type="button"
-            className="theme-btn"
-            title={`${a.t("theme.label")}: ${a.t(a.theme === "dark" ? "theme.dark" : a.theme === "light" ? "theme.light" : "theme.auto")}`}
-            onClick={nextTheme}
-          >
-            <Icon name={a.theme === "dark" ? "moon" : "sun"} size={14} />
-          </button>
-          <label className="lang-pick" title={a.t("lang.label")}>
-            <Icon name="language" size={14} />
-            <select aria-label={a.t("lang.label")} value={a.uiLangPref} onChange={(e) => a.setUiLang(e.target.value as LangPref)}>
-              <option value="auto">{a.t("lang.auto", { lang: sysLangLabel })}</option>
-              <option value="pt">{a.t("lang.pt")}</option>
-              <option value="en">{a.t("lang.en")}</option>
-              <option value="es">{a.t("lang.es")}</option>
-            </select>
-          </label>
           <button
             type="button"
             className="collapse-btn"

@@ -97,7 +97,9 @@ interface Ctx {
   setUiLang: (p: LangPref) => void;
   t: (key: I18nKey, vars?: Record<string, string | number>) => string;
   theme: ThemePref;
+  resolvedTheme: "light" | "dark";
   setTheme: (th: ThemePref) => void;
+  toggleTheme: () => void;
   fileMenuOpen: boolean;
   setFileMenuOpen: (on: boolean) => void;
   printOpen: boolean;
@@ -218,6 +220,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const v = stored(THEME_KEY);
     return v === "light" || v === "dark" ? v : "auto";
   });
+  const [systemDark, setSystemDark] = useState<boolean>(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)").matches
+      : false,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+    setSystemDark(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const resolvedTheme: "light" | "dark" = theme === "auto" ? (systemDark ? "dark" : "light") : theme;
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [printOpen, setPrintOpen] = useState(false);
   const [homeOpen, setHomeOpen] = useState(false);
@@ -225,6 +241,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setThemeRaw(th);
     store(THEME_KEY, th);
   }, []);
+  const toggleTheme = useCallback(() => {
+    setTheme(resolvedTheme === "dark" ? "light" : "dark");
+  }, [resolvedTheme, setTheme]);
   useEffect(() => {
     if (theme === "auto") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", theme);
@@ -789,7 +808,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Ctx>(() => ({
     uiLangPref, lang, systemLang, setUiLang, t,
-    theme, setTheme, fileMenuOpen, setFileMenuOpen, printOpen, setPrintOpen, homeOpen, setHomeOpen,
+    theme, resolvedTheme, setTheme, toggleTheme, fileMenuOpen, setFileMenuOpen, printOpen, setPrintOpen, homeOpen, setHomeOpen,
     doc, tabs, switchTab, closeTab, cycleTab, tool, setTool, color, setColor, zoom, setZoom, page, setPage, goTo, gotoSignal,
     view, setView, layout, setLayout, readMode, setReadMode, measureScale, setMeasureScale,
     overlayImg, setOverlayImg, compareReport, setCompareReport, fullscreen, toggleFullScreen,
@@ -798,7 +817,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     recoveryItems, restoreRecovery, dismissRecovery, busy, toast, notify, progress, scanned, ocrProgress, dialog, closeDialog, ask, askForm,
     openFile, openData, adoptFile, openDropped, save, mergeFiles, newFromImages, insertImages, printDoc, executePrint, refresh, rerender,
     undo, redo, mutate, task, runOcr, fitWidth, viewportWidth,
-  }), [uiLangPref, lang, systemLang, setUiLang, t, theme, setTheme, fileMenuOpen, printOpen, homeOpen, doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
+  }), [uiLangPref, lang, systemLang, setUiLang, t, theme, resolvedTheme, setTheme, toggleTheme, fileMenuOpen, printOpen, homeOpen, doc, tabs, switchTab, closeTab, cycleTab, tool, color, zoom, setZoom, page, goTo, gotoSignal, view, layout,
     readMode, measureScale, overlayImg, compareReport, fullscreen,
     toggleFullScreen, panel, selectedPages, search, runSearch, stepSearch, signature, stamp, ocrLang, ocrQuality, ocrCleanup,
     recoveryItems, restoreRecovery, dismissRecovery, busy, toast, notify,

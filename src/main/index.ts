@@ -131,6 +131,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: "PapyrusPDF",
+    titleBarStyle: "hidden",
     backgroundColor: "#1e242b",
     show: false,
     webPreferences: {
@@ -142,6 +143,8 @@ function createWindow(): void {
   });
   Menu.setApplicationMenu(null);
   win.once("ready-to-show", () => win?.show());
+  win.on("maximize", () => win?.webContents.send("win-maximized", true));
+  win.on("unmaximize", () => win?.webContents.send("win-maximized", false));
   win.on("close", (e) => {
     if (!dirty || !win || e2eScript) return;
     const r = dialog.showMessageBoxSync(win, {
@@ -287,6 +290,15 @@ ipcMain.on("state", (_e, s: { dirty: boolean; title: string; doc: number }) => {
 });
 
 ipcMain.handle("set-fullscreen", (_e, on: boolean) => { win?.setFullScreen(!!on); return win?.isFullScreen() ?? false; });
+ipcMain.handle("win-minimize", () => { win?.minimize(); });
+ipcMain.handle("win-maximize", () => {
+  if (!win) return false;
+  if (win.isMaximized()) win.unmaximize();
+  else win.maximize();
+  return win.isMaximized();
+});
+ipcMain.handle("win-close", () => { win?.close(); });
+ipcMain.handle("win-is-maximized", () => win?.isMaximized() ?? false);
 
 // A interface chama isto logo depois de começar a escutar "open-path".
 ipcMain.handle("take-pending-path", () => { rendererReady = true; const p = pendingPath; pendingPath = null; return p; });
